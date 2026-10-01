@@ -27,11 +27,19 @@ This release identifier is separate from the backend's settings schema version.
 
 - `Panel.qml`: Omarchy bar widget, device selection, debounced action queue,
   deadlines, and rejection of stale reads.
-- `CurveEditor.qml` / `Curve.js`: draft curve editing, spinners, presets, and
-  target practice. Only Apply changes the live profile.
+- `CurveEditor.qml` / `Curve.js`: draft curve editing, spinners, profiles, the
+  macOS Tracking speed slider, and target practice. Only Apply changes the live
+  profile.
 - `trackpads.py`: device discovery, validation, file locking, persistence, and
   per-device `hl.device` updates. The libinput validator creates configuration
   objects without opening devices. Keep its sampled curve in sync with Curve.js.
+  `profiles DEVICE` lists macOS profiles with their tracking-speed notches.
+- `pointer_profiles.py`: stdlib-only macOS profile schema, Apple's parametric
+  accelerator (IOHIDFamily) and its conversion to a 64-point libinput custom
+  curve, shared with the macOS exporter. The sources behind its constants are
+  linked in `tools/macos/README.md`.
+- `tools/macos/`: the exporter, the optional 30-second check (`probe.swift`), and
+  a checked profile. These run on macOS and are never loaded by the plugin.
 - `gestures.py` / `GestureEditor.qml`: global workspace gestures, explicit
   adoption of literal bindings in input.lua, marked-block persistence and
   compare-before-restore recovery. Uses the existing bounded subprocesses,
@@ -100,9 +108,22 @@ Scale changes rescale the effective value in the same journaled transaction;
 queued slider edits must commit under their old scale first. Schema 4 migration
 adds scale metadata without changing effective factors or generated Lua.
 The editor also uses that scale as its vertical gain limit. Saved curves stay in
-absolute gain units; changing the axis does not rescale them. Newly selected
-Mac-inspired presets fit the available range, and the backend applies the exact
-validated curve supplied by the editor, including when restoring a preset.
+absolute gain units; changing the axis does not rescale them. The backend applies
+the exact validated curve supplied by the editor, including when restoring one.
+The former Mac-inspired preset (`curve_preset: "mac"`) remains valid in saved
+state and undo records; the editor shows it as Custom with the same curve.
+
+Schema 5 adds macOS profiles without rewriting older data. Applying one sends
+`{"profile": "imported", "curve": …, "imported": {"file", "sha256",
+"tracking_speed"}}`; the backend re-reads the file, checks the digest, converts it
+for each interface in the group and the current display, validates every curve
+natively, and stores the result as `imported_curve`. `lua_for` emits each
+interface's own `accel_profile`, because one group can mix trackpads with
+different resolutions. Undo records carry the converted curve, so Restore
+previous needs no file. Resolutions come from `KNOWN_RESOLUTIONS` (keyed by
+compositor name and devicetree model) or the group's `units_per_mm` metadata;
+Apply refuses an interface without one. State rows report `imported_drift` when
+the Hyprland scale no longer matches the conversion.
 Do not change saved group IDs or historical state paths without a migration.
 
 ## Complete automated suite
@@ -112,6 +133,8 @@ Controls/Test, and Qt development tools (`qmllint`, `qmltestrunner`):
 
 ```sh
 python3 test_trackpads.py
+python3 test_pointer_profiles.py
+python3 tools/macos/test_export_profile.py
 python3 test_gestures.py
 node test-selection.js
 node test-overview-model.js
