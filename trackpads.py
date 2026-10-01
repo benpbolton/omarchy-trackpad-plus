@@ -16,10 +16,15 @@ import selectors
 import stat
 import time
 
+import pointer_profiles
+
 STATE_ROOT = Path(os.environ.get('XDG_STATE_HOME') or Path.home().resolve() / '.local/state')
 DIRECTORY = STATE_ROOT / 'omarchy/local-touchpads'
 STATE = DIRECTORY / 'settings.json'
 GENERATED = STATE_ROOT / 'omarchy/toggles/hypr/zz-local-touchpads.lua'
+PROFILES = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'trackpad-plus/profiles'
+MACHINE_MODEL = Path('/sys/firmware/devicetree/base/model')
+SCHEMA = 5
 BOOLS = {'enabled', 'natural_scroll', 'tap_to_click', 'disable_while_typing', 'clickfinger_behavior'}
 RANGES = {'sensitivity': (-1, 1), 'scroll_factor': (0.001, 10), 'scroll_scale': (0.1, 10)}
 DEFAULT_CURVE = {'precision': 0.3, 'start': 0.8, 'end': 2.8, 'fast': 1.6}
@@ -28,6 +33,18 @@ BUILTIN_APPLE = {'apple-mtp-multi-touch', 'apple-spi-trackpad', 'apple-spi-touch
                  'bcm5974', 'apple-inc.-apple-internal-keyboard-/-trackpad-1'}
 LEGACY_APPLE = BUILTIN_APPLE - {'apple-mtp-multi-touch'}
 CURVE_RANGES = {'precision': (0.01, 10), 'start': (0, 3.8), 'end': (0.2, 4), 'fast': (0.01, 10)}
+# Trackpad resolution in units/mm by compositor name and devicetree model. libinput's custom
+# profile counts raw units, so a macOS profile needs it, and reading it from the kernel takes
+# device access this plugin never has. MacBook Pro 14": 12312 units over 124.80 mm (Asahi).
+KNOWN_RESOLUTIONS = {
+    ('apple-spi-trackpad', 'Apple MacBook Pro (14-inch, M1 Pro, 2021)'): 12312 / 124.8,
+    ('apple-spi-trackpad', 'Apple MacBook Pro (14-inch, M1 Max, 2021)'): 12312 / 124.8,
+}
+# Settings stored for the editor or conversion; they are never emitted as Hyprland options.
+METADATA = {'curve', 'curve_preset', 'scroll_scale', 'imported_curve', 'units_per_mm'}
+IMPORTED_KEYS = {'name', 'file', 'sha256', 'tracking_speed', 'mm_per_point', 'px_per_point', 'devices'}
+PROFILE_FILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._ ,+-]{0,123}\.json')
+MAX_PROFILES = 32
 
 
 def validate_curve(value):
@@ -127,6 +144,62 @@ def validate_native_curve(curve):
     validate_native_profile(curve_profile(curve))
 
 
+def imported_profile(device):
+    """The native string for one interface of a materialized macOS profile."""
+    return f"custom {device['step']:.4f} " + ' '.join(f'{point:.6f}' for point in device['points'])
+
+
+def validate_imported(value):
+    """A macOS profile converted for this group's interfaces: bounded literals only."""
+    if not isinstance(value, dict) or set(value) != IMPORTED_KEYS:
+        raise ValueError('Invalid imported pointer profile')
+    pointer_profiles.text(value['name'], 80)
+    if not isinstance(value['file'], str) or not PROFILE_FILE.fullmatch(value['file']):
+        raise ValueError('Invalid pointer profile file name')
+    if not isinstance(value['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', value['sha256']):
+        raise ValueError('Invalid pointer profile digest')
+    pointer_profiles.number(value['tracking_speed'], 0, 3)
+    pointer_profiles.number(value['mm_per_point'], 0.01, 10)
+    pointer_profiles.number(value['px_per_point'], 0.01, 100)
+    devices = value['devices']
+    if not isinstance(devices, dict) or not 1 <= len(devices) <= 32:
+        raise ValueError('Invalid imported pointer profile devices')
+    for name, device in devices.items():
+        validate_name(name)
+        if not isinstance(device, dict) or set(device) != {'units_per_mm', 'step', 'points'}:
+            raise ValueError('Invalid imported pointer curve')
+        pointer_profiles.number(device['units_per_mm'], 1, 10000)
+        pointer_profiles.number(device['step'], 0.0001, 10000)
+        points = device['points']
+        if not isinstance(points, list) or not 2 <= len(points) <= 64:
+            raise ValueError('Imported pointer curves need 2 to 64 points')
+        for point in points:
+            pointer_profiles.number(point, 0, 10000)
+        if points != sorted(points):
+            raise ValueError('Imported pointer curves must not slow down as speed rises')
+    return value
+
+
+def validate_units(value):
+    if not isinstance(value, dict) or len(value) > 32:
+        raise ValueError('Expected trackpad resolutions by device name')
+    for name, units in value.items():
+        validate_name(name)
+        pointer_profiles.number(units, 1, 10000)
+    return value
+
+
+def validate_native_settings(settings):
+    """libinput itself must accept every curve that will be emitted for a group."""
+    if settings.get('accel_profile') != 'custom':
+        return
+    if settings.get('curve_preset') == 'imported':
+        for device in settings['imported_curve']['devices'].values():
+            validate_native_profile(imported_profile(device))
+    else:
+        validate_native_curve(settings.get('curve', DEFAULT_CURVE))
+
+
 def validate_name(name):
     # PS/2 Synaptics touchpads (common on ThinkPads, e.g. "synps/2-synaptics-touchpad")
     # include a literal '/' in their Hyprland device name; allow it alongside the
@@ -143,8 +216,12 @@ def validate_setting(key, value):
     elif key == 'curve':
         validate_curve(value)
     elif key == 'curve_preset':
-        if value not in ('mac', 'custom'):
+        if value not in ('mac', 'custom', 'imported'):
             raise ValueError('Unknown curve preset')
+    elif key == 'imported_curve':
+        validate_imported(value)
+    elif key == 'units_per_mm':
+        validate_units(value)
     elif key in BOOLS:
         if type(value) is not bool:
             raise ValueError('Expected a boolean')
@@ -185,20 +262,29 @@ def lua_for(groups):
     for group in groups.values():
         if not group.get('configured', True):
             continue
+        settings = group['settings']
+        # A macOS profile is converted per interface: each has its own resolution.
+        imported = settings.get('imported_curve') \
+            if settings.get('curve_preset') == 'imported' and settings.get('accel_profile') == 'custom' else None
         fields = []
-        for key, value in sorted(group['settings'].items()):
+        for key, value in sorted(settings.items()):
             validate_setting(key, value)
-            if key in ('curve', 'curve_preset', 'scroll_scale'):
+            if key in METADATA:
                 continue  # Editor metadata is never emitted as a Hyprland option.
             if key == 'accel_profile' and value == 'custom':
-                value = curve_profile(group['settings'].get('curve', DEFAULT_CURVE))
+                if imported:
+                    continue
+                value = curve_profile(settings.get('curve', DEFAULT_CURVE))
             fields.append(f'{key} = {json.dumps(value)}')
-        if group['settings'].get('accel_profile') == 'custom':
+        if settings.get('accel_profile') == 'custom':
             # Explicit identity scrolling, independent of the pointer curve.
             fields.append('scroll_points = "1 0 1"')
         for name in group['names']:
             validate_name(name)
-            lines.append('hl.device({ name = ' + json.dumps(name) + ', ' + ', '.join(fields) + ' })')
+            # An interface attached after the profile was applied keeps its own acceleration.
+            own = [f'accel_profile = {json.dumps(imported_profile(imported["devices"][name]))}'] \
+                if imported and name in imported['devices'] else []
+            lines.append('hl.device({ name = ' + json.dumps(name) + ', ' + ', '.join(own + fields) + ' })')
     return '\n'.join(lines + ['end']) + '\n'
 
 
@@ -248,6 +334,175 @@ def read_state_file(path):
                 return raw.decode('utf-8')
     except FileNotFoundError:
         return None
+
+
+def config_target(path, label='Hyprland configuration'):
+    """Resolve config links through trusted directories; state stays no-follow.
+
+    Stow may link a file or an entire directory. Resolve each link explicitly
+    under the same directory ownership checks used for state, then let the
+    no-follow reader/writer validate and access the final target.
+    """
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError(f'{label} paths must be absolute')
+    pending = list(path.parts[1:])
+    resolved, links = Path('/'), 0
+    directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        while pending:
+            part = pending.pop(0)
+            if part == '..':
+                child = os.open('..', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+                resolved = resolved.parent
+                continue
+            info = os.stat(part, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                links += 1
+                if links > 40:
+                    raise ValueError(f'{label} has a symlink loop or too many links')
+                if info.st_uid not in (0, os.getuid()):
+                    raise ValueError(f'{label} link is owned by another user')
+                target = Path(os.readlink(part, dir_fd=directory))
+                if target.is_absolute():
+                    child = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+                    os.close(directory)
+                    directory = child
+                    resolved = Path('/')
+                    pending = list(target.parts[1:]) + pending
+                else:
+                    pending = list(target.parts) + pending
+                continue
+            if pending or stat.S_ISDIR(info.st_mode):
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+                info = os.fstat(directory)
+                shared_sticky = info.st_uid == 0 and info.st_mode & stat.S_ISVTX
+                if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not shared_sticky):
+                    raise ValueError(f'{label} directories must not be writable by other users')
+            resolved /= part
+    finally:
+        os.close(directory)
+    return resolved
+
+
+def profile_files():
+    """Profile names in the user's profiles directory, which may be a Stow link."""
+    try:
+        directory = config_target(PROFILES, 'Pointer profile')
+        with state_directory(directory) as descriptor:
+            names = os.listdir(descriptor)
+    except FileNotFoundError:
+        return []
+    return sorted(name for name in names if PROFILE_FILE.fullmatch(name))[:MAX_PROFILES]
+
+
+def read_profile(name):
+    """Raw bytes of one profile; the file itself must pass the private-file checks."""
+    if not isinstance(name, str) or not PROFILE_FILE.fullmatch(name):
+        raise ValueError('Invalid pointer profile file name')
+    try:
+        raw = read_state_file(config_target(PROFILES / name, 'Pointer profile'))
+    except FileNotFoundError:
+        raw = None
+    if raw is None:
+        raise ValueError(f'Pointer profile {name} was not found')
+    return raw.encode('utf-8')
+
+
+def machine_model():
+    try:
+        with open(MACHINE_MODEL, 'rb') as stream:
+            return stream.read(256).decode('utf-8', 'replace').strip('\0').strip()
+    except OSError:
+        return ''
+
+
+def interface_units(group, name, model):
+    """Resolution for one interface: an explicit setting, then a verified built-in value."""
+    override = group['settings'].get('units_per_mm', {}).get(name)
+    if override is not None:
+        return override, 'setting'
+    known = KNOWN_RESOLUTIONS.get((name, model))
+    return (known, 'built-in') if known else (None, None)
+
+
+def panel_monitor():
+    """The built-in panel (eDP), else the focused monitor, from Hyprland."""
+    monitors = json.loads(hypr('monitors', '-j'))
+    if not isinstance(monitors, list) or not monitors:
+        raise ValueError('Hyprland reported no monitors')
+    monitor = next((m for m in monitors if str(m.get('name', '')).startswith('eDP')), None) \
+        or next((m for m in monitors if m.get('focused')), monitors[0])
+    return {key: monitor.get(key) for key in ('name', 'width', 'scale', 'physicalWidth')}
+
+
+def profile_scale(millimetres, monitor):
+    """Logical px per macOS point on this panel; 1 when Hyprland cannot report its width."""
+    if not monitor.get('physicalWidth'):
+        return 1.0
+    return pointer_profiles.px_per_point(millimetres, monitor)
+
+
+def import_profile(group, reference, monitor=None):
+    """Convert a previewed profile file for every interface in the group."""
+    raw = read_profile(reference['file'])
+    if pointer_profiles.digest(raw) != reference['sha256']:
+        raise ValueError('The pointer profile changed after it was previewed; choose it again')
+    profile = pointer_profiles.load_profile(raw)
+    millimetres = pointer_profiles.mm_per_point(profile)
+    scale = profile_scale(millimetres, monitor or panel_monitor())
+    model = machine_model()
+    devices, missing = {}, []
+    for name in group['names']:
+        units, _ = interface_units(group, name, model)
+        if units is None:
+            missing.append(name)
+            continue
+        result = pointer_profiles.convert(profile, units, scale)
+        devices[name] = {'units_per_mm': units, 'step': result['step'], 'points': result['points']}
+    if missing:
+        raise ValueError('Trackpad resolution is unknown for ' + ', '.join(missing)
+                         + '; set its units_per_mm (see tools/macos/README.md)')
+    return validate_imported({
+        'name': profile['name'], 'file': reference['file'], 'sha256': reference['sha256'],
+        'tracking_speed': profile['tracking_speed'], 'mm_per_point': round(millimetres, 6),
+        'px_per_point': round(scale, 6), 'devices': devices})
+
+
+def list_profiles(group):
+    """Previews for the profiles directory, converted for this group's first known interface."""
+    model = machine_model()
+    interfaces = {}
+    for name in group['names']:
+        units, source = interface_units(group, name, model)
+        interfaces[name] = {'units_per_mm': units, 'source': source}
+    primary = next((name for name in group['names'] if interfaces[name]['units_per_mm']), None)
+    try:
+        monitor = panel_monitor()
+    except (ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        monitor = {'error': str(exc)[:200]}
+    rows = []
+    for name in profile_files():
+        row = {'file': name}
+        try:
+            raw = read_profile(name)
+            profile = pointer_profiles.load_profile(raw)
+            row.update(name=profile['name'], sha256=pointer_profiles.digest(raw),
+                       tracking_speed=profile['tracking_speed'], source=profile['source'].get('os', ''),
+                       verified=profile['driver']['verified'])
+            if primary and 'error' not in monitor:
+                result = pointer_profiles.convert(profile, interfaces[primary]['units_per_mm'],
+                                                  profile_scale(pointer_profiles.mm_per_point(profile), monitor))
+                row['preview'] = {'plot': result['plot'], 'error_bands': result['error_bands']}
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
+            row['error'] = str(exc)[:200]
+        rows.append(row)
+    return {'directory': str(PROFILES), 'profiles': rows,
+            'context': {'interfaces': interfaces, 'monitor': monitor}}
 
 
 def atomic_write(path, content):
@@ -304,7 +559,7 @@ def state_lock():
 def validate_state(state):
     if not isinstance(state, dict) or set(state) != {'version', 'devices'}:
         raise ValueError('Invalid trackpad state structure')
-    if type(state['version']) is not int or state['version'] not in (1, 2, 3, 4):
+    if type(state['version']) is not int or not 1 <= state['version'] <= SCHEMA:
         raise ValueError('Unsupported trackpad state version; saved settings were not changed')
     devices = state['devices']
     if not isinstance(devices, dict) or len(devices) > 128:
@@ -331,6 +586,8 @@ def validate_state(state):
             raise ValueError('Missing trackpad settings')
         for option, value in settings.items():
             validate_setting(option, value)
+        if (settings.get('curve_preset') == 'imported') != ('imported_curve' in settings):
+            raise ValueError('An imported pointer profile needs its converted curve')
         scale = settings.get('scroll_scale', max(1, settings['scroll_factor']))
         normalized = settings['scroll_factor'] / scale
         if not 0.01 - 1e-9 <= normalized <= 1 + 1e-9:
@@ -344,11 +601,21 @@ def validate_change(option, value):
     if option != 'pointer_feel':
         validate_setting(option, value)
         return
-    if not isinstance(value, dict) or set(value) != {'profile', 'curve'}:
+    imported = value.get('profile') == 'imported' if isinstance(value, dict) else False
+    if not isinstance(value, dict) or set(value) != ({'profile', 'curve', 'imported'} if imported else {'profile', 'curve'}):
         raise ValueError('Expected a pointer profile and curve')
-    if value['profile'] not in ('adaptive', 'flat', 'mac', 'custom'):
+    if value['profile'] not in ('adaptive', 'flat', 'mac', 'custom', 'imported'):
         raise ValueError('Unknown pointer profile')
     validate_curve(value['curve'])
+    if imported:
+        reference = value['imported']
+        # Applying names a previewed file; undo carries the converted curve itself.
+        if isinstance(reference, dict) and set(reference) == {'file', 'sha256'}:
+            if not isinstance(reference['file'], str) or not PROFILE_FILE.fullmatch(reference['file']) \
+                    or not isinstance(reference['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', reference['sha256']):
+                raise ValueError('Invalid pointer profile reference')
+        else:
+            validate_imported(reference)
 
 
 def recover_pending():
@@ -392,8 +659,7 @@ def restore_previous(state, key, persist=True):
 def validate_persisted(state):
     validate_state(state)
     for group in state['devices'].values():
-        if group['settings'].get('accel_profile') == 'custom':
-            validate_native_curve(group['settings'].get('curve', DEFAULT_CURVE))
+        validate_native_settings(group['settings'])
 
 
 def save(state):
@@ -409,8 +675,7 @@ def reconcile_generated(state, previous=None):
     if stored == expected:
         return
     for group in state['devices'].values():
-        if group['settings'].get('accel_profile') == 'custom':
-            validate_native_curve(group['settings'].get('curve', DEFAULT_CURVE))
+        validate_native_settings(group['settings'])
     groups = state['devices']
     if previous is not None:
         # Old curve formats cannot be rendered by the current Lua serializer.
@@ -473,18 +738,31 @@ def saved_device_owners(live, state):
     return routed
 
 
-def snapshot(state, live):
+def imported_active(settings):
+    return settings.get('curve_preset') == 'imported' and settings.get('accel_profile') == 'custom'
+
+
+def snapshot(state, live, monitor=None):
     rows = []
     for key in sorted(state['devices'], key=lambda k: (k != 'apple', k != 'dell', k)):
         group = copy.deepcopy(state['devices'][key])
         group['connected'] = key in live
+        settings = group['settings']
+        if monitor and imported_active(settings):
+            # The curve was converted for one Hyprland scale; a new scale needs a fresh Apply.
+            imported = settings['imported_curve']
+            try:
+                current = profile_scale(imported['mm_per_point'], monitor)
+                group['imported_drift'] = abs(current / imported['px_per_point'] - 1) > 0.01
+            except ValueError:
+                pass  # An incomplete monitor report says nothing about drift.
         rows.append(group)
     return {'devices': rows}
 
 
 def migrate(state):
     """The previous panel inherited the driver's default adaptive profile."""
-    if not isinstance(state, dict) or type(state.get('version')) is not int or state['version'] not in (1, 2, 3, 4):
+    if not isinstance(state, dict) or type(state.get('version')) is not int or not 1 <= state['version'] <= SCHEMA:
         raise ValueError('Unsupported trackpad state version; saved settings were not changed')
     updated = copy.deepcopy(state)
     for group in updated['devices'].values():
@@ -509,7 +787,7 @@ def migrate(state):
                                                'end': 2 * old['transition'], 'fast': old['fast']})
             if previous['profile'] == 'mac':
                 previous['profile'] = 'custom'
-    updated['version'] = 4
+    updated['version'] = SCHEMA  # 5 adds imported macOS profiles; older data is unchanged.
     validate_state(updated)
     devices = updated['devices']
     legacy = [key for key in LEGACY_APPLE if key in devices
@@ -539,20 +817,26 @@ def change(state, key, option, value):
         updated['devices'][key]['configured'] = True
     settings = updated['devices'][key]['settings']
     if option == 'pointer_feel':
-        if not isinstance(value, dict) or set(value) != {'profile', 'curve'}:
-            raise ValueError('Expected a pointer profile and curve')
+        validate_change(option, value)
         profile = value['profile']
-        if profile not in ('adaptive', 'flat', 'mac', 'custom'):
-            raise ValueError('Unknown pointer profile')
-        curve = validate_curve(value['curve'])
+        curve = value['curve']
         old_profile = settings.get('accel_profile', 'adaptive')
-        updated['devices'][key]['previous_pointer_feel'] = {
+        previous = {
             'profile': settings.get('curve_preset', 'custom') if old_profile == 'custom' else old_profile,
             'curve': copy.deepcopy(settings.get('curve', DEFAULT_CURVE)),
         }
-        settings['accel_profile'] = 'custom' if profile in ('mac', 'custom') else profile
+        if previous['profile'] == 'imported':
+            previous['imported'] = copy.deepcopy(settings['imported_curve'])
+        updated['devices'][key]['previous_pointer_feel'] = previous
+        settings.pop('imported_curve', None)
+        if profile == 'imported':
+            imported = value['imported']
+            # A file reference is converted now; undo supplies the converted curve itself.
+            settings['imported_curve'] = imported if 'devices' in imported \
+                else import_profile(updated['devices'][key], imported)
+        settings['accel_profile'] = 'custom' if profile in ('mac', 'custom', 'imported') else profile
         settings['curve'] = dict(curve)  # The editor sizes new presets to the device range.
-        settings['curve_preset'] = 'mac' if profile == 'mac' else 'custom'
+        settings['curve_preset'] = profile if profile in ('mac', 'imported') else 'custom'
     else:
         validate_setting(option, value)
         if option == 'scroll_scale':
@@ -584,8 +868,10 @@ def main():
         validate_name(sys.argv[2])
         value = json.loads(sys.argv[4])
         validate_change(sys.argv[3], value)
+    elif command == 'profiles' and len(sys.argv) == 3:
+        validate_name(sys.argv[2])
     elif command not in ('state', 'init') or len(sys.argv) > 2:
-        raise ValueError('Usage: trackpads.py [state|init|set DEVICE OPTION JSON_VALUE]')
+        raise ValueError('Usage: trackpads.py [state|init|profiles DEVICE|set DEVICE OPTION JSON_VALUE]')
     with state_lock():
         # Refuse future/corrupt state before processing even an older journal.
         raw = read_state_file(STATE)
@@ -618,9 +904,20 @@ def main():
             # reconciliation succeeds, so a failed/interrupted refresh retries.
             atomic_write(STATE, json.dumps(state, indent=2) + '\n')
         reconcile_generated(state, previous)
+        if command == 'profiles':
+            if sys.argv[2] not in state['devices']:
+                raise ValueError('Unknown trackpad')
+            print(json.dumps(list_profiles(state['devices'][sys.argv[2]])))
+            return
         if command == 'set':
             state = change(state, sys.argv[2], sys.argv[3], value)
-        print(json.dumps(snapshot(state, live)))
+        monitor = None
+        if any(imported_active(group['settings']) for group in state['devices'].values()):
+            try:
+                monitor = panel_monitor()
+            except (ValueError, RuntimeError, subprocess.TimeoutExpired):
+                pass  # Drift is advisory; the saved curve stays in effect.
+        print(json.dumps(snapshot(state, live, monitor)))
 
 
 if __name__ == '__main__':

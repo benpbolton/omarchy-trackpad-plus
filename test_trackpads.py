@@ -1,4 +1,6 @@
+from contextlib import nullcontext
 import copy
+import ctypes
 import importlib.util
 import io
 from itertools import product
@@ -13,6 +15,13 @@ from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('trackpads',Path(__file__).with_name('trackpads.py'))
 m=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+MAC_PROFILE = Path(__file__).with_name('tools') / 'macos' / 'profiles' / 'MacBookPro18-3-tracking-0.875.json'
+PANEL = [{'name': 'eDP-1', 'width': 3024, 'height': 1890, 'scale': 2.0, 'physicalWidth': 302, 'focused': True}]
+try:
+    ctypes.CDLL('libinput.so.10')
+    NATIVE = nullcontext  # Linux: the real libinput validates every imported curve.
+except OSError:
+    NATIVE = lambda: patch.object(m, 'validate_native_profile')  # noqa: E731 (macOS development)
 
 class TrackpadTests(unittest.TestCase):
     def setUp(self):
@@ -270,7 +279,7 @@ class TrackpadTests(unittest.TestCase):
         self.assertEqual(m.read_state_file(m.STATE), 'safe')
 
     def test_future_and_malformed_state_is_rejected(self):
-        for state in [dict(self.state, version=5), dict(self.state, version=True),
+        for state in [dict(self.state, version=6), dict(self.state, version=True),
                       dict(self.state, extra='unsupported')]:
             with self.assertRaises(ValueError):
                 m.migrate(state)
@@ -442,7 +451,7 @@ class TrackpadTests(unittest.TestCase):
 
     def test_acceleration_migration_preserves_existing_settings(self):
         migrated = m.migrate(self.state)
-        self.assertEqual(migrated['version'], 4)
+        self.assertEqual(migrated['version'], 5)
         for key in self.groups:
             settings = dict(migrated['devices'][key]['settings'])
             self.assertEqual(settings.pop('accel_profile'), 'adaptive')
@@ -627,5 +636,185 @@ class TrackpadTests(unittest.TestCase):
             with patch.object(m, 'atomic_write') as write, self.assertRaises(ValueError):
                 m.save(state)
             write.assert_not_called()
+
+    def profiles_dir(self):
+        directory = Path(tempfile.mkdtemp(dir=m.DIRECTORY))
+        directory.chmod(0o700)
+        replacement = patch.object(m, 'PROFILES', directory)
+        replacement.start()
+        self.addCleanup(replacement.stop)
+        (directory / MAC_PROFILE.name).write_bytes(MAC_PROFILE.read_bytes())
+        return directory
+
+    def compositor(self, *command, monitors=PANEL):
+        if command == ('monitors', '-j'):
+            return json.dumps(monitors)
+        return 'ok'
+
+    def reference(self, name=MAC_PROFILE.name):
+        raw = (m.PROFILES / name).read_bytes()
+        return {'file': name, 'sha256': m.pointer_profiles.digest(raw)}
+
+    def imported_state(self):
+        """Apple group with resolutions for both Magic Trackpad interfaces and a macOS profile."""
+        self.profiles_dir()
+        units = {'apple-inc.-magic-trackpad': 47.6, 'apple-inc.-magic-trackpad-1': 47.6}
+        with patch.object(m, 'hypr', side_effect=self.compositor), patch.object(m, 'save'), NATIVE():
+            state = m.change(m.migrate(self.state), 'apple', 'units_per_mm', units)
+            state = m.change(state, 'apple', 'pointer_feel',
+                             {'profile': 'imported', 'curve': m.DEFAULT_CURVE, 'imported': self.reference()})
+        return state
+
+    def test_macos_profile_is_converted_per_interface_and_emitted(self):
+        state = self.imported_state()
+        settings = state['devices']['apple']['settings']
+        imported = settings['imported_curve']
+        self.assertEqual(settings['accel_profile'], 'custom')
+        self.assertEqual(settings['curve_preset'], 'imported')
+        self.assertEqual(settings['curve'], m.DEFAULT_CURVE)  # the custom curve is kept for later
+        self.assertEqual(imported['name'], 'MacBook Pro (M1 Pro) · Tracking 0.875')
+        self.assertEqual(imported['px_per_point'], round(301.21 / 1512 * 3024 / 2 / 302, 6))
+        self.assertEqual(set(imported['devices']), {'apple-inc.-magic-trackpad', 'apple-inc.-magic-trackpad-1'})
+        device = imported['devices']['apple-inc.-magic-trackpad']
+        self.assertEqual(len(device['points']), 64)
+        self.assertEqual(device['units_per_mm'], 47.6)
+        lua = m.lua_for({'apple': state['devices']['apple']})
+        for name in imported['devices']:
+            line = next(line for line in lua.splitlines() if json.dumps(name) in line)
+            self.assertIn(f'accel_profile = "custom {device["step"]:.4f} 0.000000 ', line)
+            self.assertIn('scroll_points = "1 0 1"', line)
+            self.assertEqual(line.count('accel_profile'), 1)
+        self.assertNotIn('imported_curve', lua)
+        self.assertNotIn('units_per_mm', lua)
+        self.assertEqual(state['devices']['apple']['previous_pointer_feel']['profile'], 'adaptive')
+        self.assertEqual(m.migrate(state), state)
+
+    def test_builtin_resolution_is_used_for_known_macbooks(self):
+        self.profiles_dir()
+        group = {'id': 'apple', 'label': 'Apple', 'names': ['apple-spi-trackpad'], 'settings': {}}
+        with patch.object(m, 'machine_model', return_value='Apple MacBook Pro (14-inch, M1 Pro, 2021)'):
+            self.assertEqual(m.interface_units(group, 'apple-spi-trackpad', m.machine_model()),
+                             (12312 / 124.8, 'built-in'))
+            imported = m.import_profile(group, self.reference(), PANEL[0])
+        self.assertAlmostEqual(imported['devices']['apple-spi-trackpad']['step'], 0.5211)
+        group['settings']['units_per_mm'] = {'apple-spi-trackpad': 98}
+        self.assertEqual(m.interface_units(group, 'apple-spi-trackpad', 'Apple MacBook Pro (14-inch, M1 Pro, 2021)'),
+                         (98, 'setting'))
+        with patch.object(m, 'machine_model', return_value='Apple MacBook Air (M1, 2020)'):
+            self.assertEqual(m.interface_units({'settings': {}}, 'apple-spi-trackpad', m.machine_model()), (None, None))
+
+    def test_macos_profile_needs_resolution_and_the_previewed_file(self):
+        self.profiles_dir()
+        state = m.migrate(self.state)
+        apply = lambda reference: m.change(state, 'apple', 'pointer_feel',
+                                           {'profile': 'imported', 'curve': m.DEFAULT_CURVE, 'imported': reference})
+        with patch.object(m, 'hypr', side_effect=self.compositor) as run, patch.object(m, 'save') as save, NATIVE():
+            with self.assertRaisesRegex(ValueError, 'resolution is unknown for apple-inc.-magic-trackpad'):
+                apply(self.reference())
+            state = m.change(state, 'apple', 'units_per_mm',
+                             {'apple-inc.-magic-trackpad': 47.6, 'apple-inc.-magic-trackpad-1': 47.6})
+            run.reset_mock(); save.reset_mock()
+            with self.assertRaisesRegex(ValueError, 'changed after it was previewed'):
+                apply(dict(self.reference(), sha256='0' * 64))
+            with self.assertRaises((ValueError, OSError)):
+                apply({'file': 'missing.json', 'sha256': '0' * 64})
+            for reference in [{'file': '../escape.json', 'sha256': '0' * 64}, {'file': 'x.json'}]:
+                with self.assertRaises(ValueError):
+                    m.validate_change('pointer_feel', {'profile': 'imported', 'curve': m.DEFAULT_CURVE, 'imported': reference})
+            self.assertFalse([call for call in run.call_args_list if call.args[0] == 'eval'])
+            save.assert_not_called()
+
+    def test_restore_previous_round_trips_the_converted_curve_without_the_file(self):
+        state = self.imported_state()
+        original = copy.deepcopy(state['devices']['apple']['settings']['imported_curve'])
+        with patch.object(m, 'hypr', side_effect=self.compositor), patch.object(m, 'save'), NATIVE():
+            state = m.change(state, 'apple', 'pointer_feel', {'profile': 'custom', 'curve': m.DEFAULT_CURVE})
+            settings = state['devices']['apple']['settings']
+            self.assertNotIn('imported_curve', settings)
+            self.assertEqual(settings['curve_preset'], 'custom')
+            previous = state['devices']['apple']['previous_pointer_feel']
+            self.assertEqual(previous['profile'], 'imported')
+            self.assertEqual(previous['imported'], original)
+            (m.PROFILES / MAC_PROFILE.name).unlink()
+            state = m.change(state, 'apple', 'pointer_feel', previous)
+        settings = state['devices']['apple']['settings']
+        self.assertEqual(settings['imported_curve'], original)
+        self.assertEqual(settings['curve_preset'], 'imported')
+        self.assertEqual(state['devices']['apple']['previous_pointer_feel']['profile'], 'custom')
+
+    def test_profiles_command_previews_valid_files_and_reports_bad_ones(self):
+        directory = self.profiles_dir()
+        (directory / 'broken.json').write_text('{"format": "nope"}')
+        (directory / 'notes.txt').write_text('ignored')
+        state = m.migrate(self.state)
+        state['devices']['apple']['settings']['units_per_mm'] = {'apple-inc.-magic-trackpad': 47.6}
+        with patch.object(m, 'hypr', side_effect=self.compositor):
+            result = m.list_profiles(state['devices']['apple'])
+        self.assertEqual(result['directory'], str(directory))
+        rows = {row['file']: row for row in result['profiles']}
+        self.assertEqual(set(rows), {'broken.json', MAC_PROFILE.name})
+        self.assertIn('error', rows['broken.json'])
+        good = rows[MAC_PROFILE.name]
+        self.assertEqual(good['sha256'], self.reference()['sha256'])
+        self.assertTrue(good['verified'].startswith('probe '))
+        self.assertEqual(len(good['preview']['plot']), 41)
+        self.assertLessEqual(good['preview']['error_bands']['6-600'], 2)
+        interfaces = result['context']['interfaces']
+        self.assertEqual(interfaces['apple-inc.-magic-trackpad'], {'units_per_mm': 47.6, 'source': 'setting'})
+        self.assertEqual(interfaces['apple-inc.-magic-trackpad-1'], {'units_per_mm': None, 'source': None})
+        self.assertEqual(result['context']['monitor']['name'], 'eDP-1')
+
+    def test_profiles_directory_may_be_a_stow_link_but_files_stay_private(self):
+        directory = self.profiles_dir()
+        link = directory.parent / 'linked-profiles'
+        link.symlink_to(directory, target_is_directory=True)
+        with patch.object(m, 'PROFILES', link):
+            self.assertEqual(m.profile_files(), [MAC_PROFILE.name])
+            self.assertEqual(m.read_profile(MAC_PROFILE.name), MAC_PROFILE.read_bytes())
+            (directory / MAC_PROFILE.name).chmod(0o666)
+            with self.assertRaisesRegex(ValueError, 'privately writable'):
+                m.read_profile(MAC_PROFILE.name)
+        with patch.object(m, 'PROFILES', directory / 'absent'):
+            self.assertEqual(m.profile_files(), [])
+
+    def test_interfaces_added_later_keep_their_own_acceleration(self):
+        state = self.imported_state()
+        group = copy.deepcopy(state['devices']['apple'])
+        group['names'].append('apple-inc.-magic-trackpad-2')
+        line = next(line for line in m.lua_for({'apple': group}).splitlines()
+                    if '"apple-inc.-magic-trackpad-2"' in line)
+        self.assertNotIn('accel_profile', line)
+        self.assertIn('tap_to_click = true', line)
+
+    def test_imported_settings_are_validated_like_any_other(self):
+        state = self.imported_state()
+        for mutate in [lambda s: s['imported_curve']['devices']['apple-inc.-magic-trackpad']['points'].reverse(),
+                       lambda s: s['imported_curve']['devices']['apple-inc.-magic-trackpad']['points'].extend([1e3]),
+                       lambda s: s['imported_curve']['devices']['apple-inc.-magic-trackpad'].update(step=0),
+                       lambda s: s['imported_curve'].update(extra=1),
+                       lambda s: s['imported_curve'].update(file='../x.json'),
+                       lambda s: s.pop('imported_curve'),
+                       lambda s: s.update(curve_preset='custom'),
+                       lambda s: s.update(units_per_mm={'bad"name': 1})]:
+            broken = copy.deepcopy(state)
+            mutate(broken['devices']['apple']['settings'])
+            with self.assertRaises(ValueError):
+                m.validate_state(broken)
+
+    def test_flat_or_adaptive_override_still_wins_over_an_imported_curve(self):
+        state = self.imported_state()
+        with patch.object(m, 'hypr', side_effect=self.compositor), patch.object(m, 'save'), NATIVE():
+            state = m.change(state, 'apple', 'accel_profile', 'flat')
+        lua = m.lua_for({'apple': state['devices']['apple']})
+        self.assertIn('accel_profile = "flat"', lua)
+        self.assertNotIn('custom', lua)
+
+    def test_display_scale_drift_is_reported_without_rewriting(self):
+        state = self.imported_state()
+        same = m.snapshot(state, {}, PANEL[0])['devices'][0]
+        moved = m.snapshot(state, {}, dict(PANEL[0], scale=1.6))['devices'][0]
+        self.assertFalse(same['imported_drift'])
+        self.assertTrue(moved['imported_drift'])
+        self.assertNotIn('imported_drift', m.snapshot(state, {})['devices'][0])
 
 if __name__=='__main__':unittest.main()
