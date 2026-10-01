@@ -1,14 +1,6 @@
 // Editor gain controls are sampled as output velocities for libinput.
 function defaults() { return { precision: 0.3, start: 0.8, end: 2.8, fast: 1.6 } }
 
-function presetForScale(maximum) {
-  var curve = defaults()
-  var factor = Math.min(1, maximum / curve.fast)
-  curve.precision = Math.max(0.01, Number((curve.precision * factor).toFixed(6)))
-  curve.fast = Number((curve.fast * factor).toFixed(6))
-  return curve
-}
-
 function copy(value) { return JSON.parse(JSON.stringify(value)) }
 
 // Preserve the shape of saved three-handle curves when opening the new editor.
@@ -57,10 +49,46 @@ function adjust(curve, handle, value, precise, maximum) {
 }
 
 function fromSettings(settings) {
-  return {
-    profile: settings.accel_profile === "custom" ? (settings.curve_preset || "custom") : settings.accel_profile,
+  // The former Mac-inspired preset was a plain curve; it is edited as Custom.
+  var preset = settings.curve_preset === "imported" ? "imported" : "custom"
+  var feel = {
+    profile: settings.accel_profile === "custom" ? preset : settings.accel_profile,
     curve: normalize(settings.curve || defaults())
   }
+  // The converted macOS curve travels with the feel so Restore previous needs no file.
+  if (feel.profile === "imported" && settings.imported_curve) feel.imported = copy(settings.imported_curve)
+  return feel
 }
 
-if (typeof module !== "undefined") module.exports = { defaults, presetForScale, copy, normalize, gain, points, sampledGain, adjust, fromSettings }
+// Profiles that replace libinput's adaptive/flat response, so Pointer Speed does not apply.
+// "mac" remains for undo records saved by earlier releases.
+function usesCurve(profile) { return profile === "mac" || profile === "custom" || profile === "imported" }
+
+function label(feel) {
+  if (feel.profile === "imported") return "macOS · " + (feel.imported && feel.imported.name || "profile")
+  return ({ adaptive: "System", flat: "Flat" })[feel.profile] || "Custom"
+}
+
+// The backend takes a file reference and tracking speed, or for undo the converted curve itself.
+function request(feel) {
+  var value = { profile: feel.profile, curve: copy(feel.curve) }
+  if (feel.profile === "imported") {
+    var imported = feel.imported
+    value.imported = imported.devices ? copy(imported) : { file: imported.file, sha256: imported.sha256 }
+    if (!imported.devices && imported.tracking_speed !== undefined) value.imported.tracking_speed = imported.tracking_speed
+  }
+  return value
+}
+
+// Equal feels apply the same curve: a reference and its converted curve share file, digest and speed.
+function same(a, b) {
+  function key(feel) {
+    var value = { profile: feel.profile, curve: feel.curve }
+    if (feel.profile === "imported")
+      value.imported = feel.imported ? [feel.imported.file, feel.imported.sha256, feel.imported.tracking_speed] : null
+    return JSON.stringify(value)
+  }
+  return key(a) === key(b)
+}
+
+if (typeof module !== "undefined") module.exports = { defaults, copy, normalize, gain, points, sampledGain, adjust, fromSettings, usesCurve, label, request, same }

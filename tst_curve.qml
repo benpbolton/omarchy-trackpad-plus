@@ -28,6 +28,9 @@ Rectangle {
       editor.busy = false
       editor.settingsError = ""
       editor.canRestore = false
+      editor.profiles = []
+      editor.profilesStatus = ""
+      editor.drift = false
       editor.begin()
       applied.clear(); restored.clear(); back.clear()
     }
@@ -49,9 +52,6 @@ Rectangle {
       editor.gainMaximum = 1
       verify(editor.curveExceedsRange)
       compare(editor.draft.curve.fast, 3)
-      editor.choose("mac")
-      compare(editor.draft.curve.fast, 1)
-      verify(!editor.curveExceedsRange)
     }
     function test_failed_save_is_not_labelled_applied() {
       editor.settingsError = "Compositor unavailable"
@@ -60,14 +60,14 @@ Rectangle {
       verify(status.text.indexOf("Applied") < 0)
     }
     function test_preview_apply_and_restore() {
-      editor.choose("mac")
+      editor.choose("flat")
       verify(editor.dirty)
       compare(editor.saved.profile, "adaptive")
       compare(applied.count, 0)
       var apply = findChild(editor, "applyCurve")
       mouseClick(apply)
       compare(applied.count, 1)
-      compare(editor.saved.profile, "mac")
+      compare(editor.saved.profile, "flat")
       verify(!editor.dirty)
       editor.canRestore = true
       mouseClick(findChild(editor, "restoreCurve"))
@@ -99,7 +99,7 @@ Rectangle {
       compare(back.count, 1)
     }
     function test_practice_and_busy_state() {
-      editor.choose("mac")
+      editor.choose("flat")
       editor.busy = true
       verify(!findChild(editor, "applyCurve").enabled)
       mouseClick(findChild(editor, "practiceTarget"))
@@ -219,12 +219,111 @@ Rectangle {
       verify(editor.draft.curve.fast > before)
       compare(editor.draft.curve.end, 4)
     }
+    function profileRows() {
+      return [
+        {file: "mac.json", name: "MacBook Pro (M1 Pro)", sha256: "a".repeat(64), tracking_speed: 0.875,
+         speeds: [0, 0.125, 0.5, 0.6875, 0.875, 1, 1.5, 2, 2.5, 3]},
+        {file: "broken.json", error: "Unsupported pointer profile format"}
+      ]
+    }
+    function converted() {
+      return {name: "MacBook Pro (M1 Pro)", file: "mac.json", sha256: "a".repeat(64), tracking_speed: 0.875,
+        mm_per_point: 0.2, px_per_point: 1,
+        devices: {"apple-spi-trackpad": {units_per_mm: 98.65, step: 1, points: [0, 1, 2, 3, 4, 5]}}}
+    }
+    function test_macos_profile_shows_only_the_model_and_tracking_speed() {
+      editor.profiles = profileRows()
+      editor.choose("imported")
+      verify(editor.dirty)
+      compare(editor.draft.imported.file, "mac.json")
+      compare(editor.draft.imported.tracking_speed, 0.875, "starts at the Mac's own setting")
+      verify(!findChild(editor, "curvePlot").visible, "an imported curve has no chart, handles or spinners")
+      compare(findChild(editor, "profileRow0").text, "MacBook Pro (M1 Pro)")
+      verify(findChild(editor, "profileRow0").selected)
+      verify(!findChild(editor, "profileRow1").enabled, "invalid files are listed but cannot be chosen")
+      var slider = findChild(editor, "trackingSpeed")
+      verify(slider.visible)
+      compare(slider.value, 4)
+      mouseClick(findChild(editor, "applyCurve"))
+      compare(applied.count, 1)
+      compare(applied.signalArguments[0][0].imported.sha256, "a".repeat(64))
+      compare(applied.signalArguments[0][0].imported.tracking_speed, 0.875)
+    }
+    function test_tracking_speed_moves_between_apples_notches() {
+      editor.profiles = profileRows()
+      editor.saved = {profile: "imported", curve: Curve.defaults(), imported: converted()}
+      editor.begin()
+      verify(!editor.dirty)
+      wait(50)
+      var slider = findChild(editor, "trackingSpeed")
+      slider.forceActiveFocus()
+      keyClick(Qt.Key_Right)
+      compare(editor.draft.imported.tracking_speed, 1)
+      verify(editor.dirty)
+      keyClick(Qt.Key_Right)
+      compare(editor.draft.imported.tracking_speed, 1.5)
+      keyClick(Qt.Key_Left); keyClick(Qt.Key_Left)
+      compare(editor.draft.imported.tracking_speed, 0.875)
+      verify(!editor.dirty, "returning to the applied speed leaves nothing to apply")
+      verify(!!editor.draft.imported.devices)
+      keyClick(Qt.Key_Left)
+      mouseClick(findChild(editor, "applyCurve"))
+      compare(applied.signalArguments[0][0].imported.tracking_speed, 0.6875)
+      verify(!applied.signalArguments[0][0].imported.devices)
+    }
+    function test_macos_profile_empty_state() {
+      editor.choose("imported")
+      verify(findChild(editor, "profilesEmpty").visible)
+      verify(!findChild(editor, "trackingSpeed").visible)
+      verify(!findChild(editor, "applyCurve").enabled, "nothing to apply without a profile")
+      editor.profilesStatus = "Looking for macOS profiles…"
+      verify(!findChild(editor, "profilesEmpty").visible)
+    }
+    function test_saved_macos_profile_is_clean_and_reapplies_after_drift() {
+      editor.profiles = profileRows()
+      var saved = converted()
+      saved.tracking_speed = 1.5
+      editor.saved = {profile: "imported", curve: Curve.defaults(), imported: saved}
+      editor.begin()
+      verify(!editor.dirty)
+      compare(findChild(editor, "trackingSpeed").value, 6)
+      mouseClick(findChild(editor, "profileRow0"))
+      verify(!editor.dirty, "choosing the applied file keeps its saved curve")
+      verify(!findChild(editor, "reapplyProfile").visible)
+      editor.drift = true
+      verify(findChild(editor, "importedDrift").visible)
+      wait(50)
+      mouseClick(findChild(editor, "reapplyProfile"))
+      compare(applied.count, 1)
+      verify(!applied.signalArguments[0][0].imported.devices, "re-apply converts the file again")
+      compare(applied.signalArguments[0][0].imported.tracking_speed, 1.5, "at the applied speed")
+      editor.saved = {profile: "imported", curve: Curve.defaults(), imported: converted()}
+      editor.profiles = []
+      editor.begin()
+      verify(!findChild(editor, "reapplyProfile").visible, "a missing file cannot be re-applied")
+      verify(findChild(editor, "importedDrift").text.indexOf("gone") >= 0)
+    }
+    function test_profile_choices_fit_with_custom_last() {
+      var right = 0
+      for (var id of ["adaptive", "flat", "imported", "custom"]) {
+        var choice = findChild(editor, "profileChoice-" + id)
+        verify(choice.width > 60)
+        var left = choice.mapToItem(editor, 0, 0).x
+        verify(left >= right, id + " follows the previous choice")
+        right = choice.mapToItem(editor, choice.width, 0).x
+      }
+      verify(right <= editor.width + 0.5)
+    }
     function test_visual_layout() {
-      editor.choose("mac")
+      editor.choose("custom")
       wait(100)
       verify(editor.implicitHeight < 740)
       var picture = grabImage(editor)
       verify(picture.width > 0)
+      editor.profiles = profileRows()
+      editor.choose("imported")
+      wait(100)
+      verify(editor.implicitHeight < 740)
     }
   }
 }

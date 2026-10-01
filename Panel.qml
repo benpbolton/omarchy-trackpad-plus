@@ -38,6 +38,11 @@ Panel {
   property bool pointerAcceleration: true
   property var pointerFeel: ({ profile: "adaptive", curve: Curve.defaults() })
   property var previousFeels: ({})
+  property bool pointerDrift: false
+  // macOS profiles found for the selected trackpad, read when the editor opens.
+  property var pointerProfiles: ({ loading: false, error: "", directory: "", profiles: [] })
+  property int profilesRequest: 0
+  property bool profilesPending: false
   property bool editingCurve: false
   property bool deviceSettingsOpen: false
   property bool gestureCanEdit: false
@@ -89,6 +94,7 @@ Panel {
     clickfingerBehavior = v.clickfinger_behavior
     pointerAcceleration = v.accel_profile !== "flat"
     pointerFeel = Curve.fromSettings(v)
+    pointerDrift = !!row.imported_drift
     var previous = Curve.copy(previousFeels)
     if (row.previous_pointer_feel) previous[selectedDevice] = row.previous_pointer_feel
     else delete previous[selectedDevice]
@@ -123,7 +129,7 @@ Panel {
     }
     editGeneration++
     settingsError = ""
-    queue.push({ device: selectedDevice, option: option, value: value })
+    queue.push({ device: selectedDevice, option: option, value: option === "pointer_feel" ? Curve.request(value) : value })
     pendingActions = queue
     // Keep the local snapshot consistent while queued writes finish.
     for (var i = 0; i < devices.length; i++) {
@@ -131,9 +137,12 @@ Panel {
         var settings = devices[i].settings
         if (option === "pointer_feel") {
           devices[i].previous_pointer_feel = Curve.fromSettings(settings)
-          settings.accel_profile = value.profile === "mac" || value.profile === "custom" ? "custom" : value.profile
+          devices[i].imported_drift = false
+          settings.accel_profile = Curve.usesCurve(value.profile) ? "custom" : value.profile
           settings.curve = Curve.copy(value.curve)
-          settings.curve_preset = value.profile === "mac" ? "mac" : "custom"
+          settings.curve_preset = value.profile === "mac" || value.profile === "imported" ? value.profile : "custom"
+          if (value.profile === "imported") settings.imported_curve = Curve.copy(value.imported)
+          else delete settings.imported_curve
         } else if (option === "scroll_scale") {
           var oldScale = settings.scroll_scale || Math.max(1, settings.scroll_factor)
           settings.scroll_factor = Math.round(settings.scroll_factor * value / oldScale * 1000000) / 1000000
@@ -239,7 +248,7 @@ Panel {
     sections.push("tabs")
     if (activeTab === "scrolling") return sections.concat(["scroll", "natural"])
     if (activeTab === "gestures") return sections
-    if (pointerFeel.profile !== "mac" && pointerFeel.profile !== "custom") sections.push("pointer")
+    if (!Curve.usesCurve(pointerFeel.profile)) sections.push("pointer")
     return sections.concat(["acceleration", "tap", "typing", "clickfinger"])
   }
 
@@ -372,6 +381,37 @@ Panel {
     selectDevice(selectedDevice) // Flush any pending speed edits first.
     editingCurve = true
     curveEditor.begin()
+    refreshProfiles()
+  }
+
+  // Profiles are listed for the device being edited; a reply for another device is dropped.
+  function refreshProfiles() {
+    if (profilesProc.running) { profilesPending = true; return }
+    profilesPending = false
+    profilesRequest++
+    pointerProfiles = { loading: true, error: "", directory: pointerProfiles.directory, profiles: pointerProfiles.profiles, device: selectedDevice }
+    profilesProc.requestId = profilesRequest
+    profilesProc.command = bounded(15, ["python3", backend, "profiles", selectedDevice])
+    profilesProc.running = true
+  }
+
+  function receiveProfiles(raw, request) {
+    if (request !== profilesRequest) return
+    var data
+    try { data = JSON.parse(raw) } catch (e) { data = { error: "Could not read pointer profiles" } }
+    if (data.error || pointerProfiles.device !== selectedDevice) {
+      pointerProfiles = { loading: false, error: data.error || "", directory: "", profiles: [], device: pointerProfiles.device }
+      return
+    }
+    var monitor = data.context && data.context.monitor || {}
+    pointerProfiles = { loading: false, error: monitor.error ? "Display size unavailable: " + monitor.error : "",
+      directory: data.directory || "", profiles: data.profiles || [], device: pointerProfiles.device }
+  }
+
+  function finishProfiles(code, request) {
+    if (request === profilesRequest && pointerProfiles.loading)
+      pointerProfiles = { loading: false, error: "Could not read pointer profiles", directory: "", profiles: [], device: pointerProfiles.device }
+    if (profilesPending && editingCurve) refreshProfiles()
   }
 
   function applyPointerFeel(value) {
@@ -423,7 +463,7 @@ Panel {
   }
 
   function adjustPointerSpeed(delta) {
-    if (pointerFeel.profile === "mac" || pointerFeel.profile === "custom") return
+    if (Curve.usesCurve(pointerFeel.profile)) return
     var next = Model.clampSensitivity(pointerSpeed + delta)
     pointerSpeed = next
     pendingPointerSpeed = next
@@ -431,7 +471,7 @@ Panel {
   }
 
   function setPointerSpeed(value) {
-    if (pointerFeel.profile === "mac" || pointerFeel.profile === "custom") return
+    if (Curve.usesCurve(pointerFeel.profile)) return
     var clamped = Model.clampSensitivity(value)
     pointerSpeed = clamped
     pendingPointerSpeed = clamped
@@ -552,6 +592,19 @@ Panel {
   }
 
   Process {
+    id: profilesProc
+    property int requestId: 0
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.receiveProfiles(String(text), profilesProc.requestId)
+    }
+    onExited: function(code, status) {
+      var request = requestId
+      Qt.callLater(function() { root.finishProfiles(code, request) })
+    }
+  }
+
+  Process {
     id: gestureProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -642,6 +695,10 @@ Panel {
             busy: actionProc.running || root.pendingActions.length > 0
             settingsError: root.settingsError
             canRestore: !!root.previousFeels[root.selectedDevice]
+            drift: root.pointerDrift
+            profiles: root.pointerProfiles.device === root.selectedDevice ? root.pointerProfiles.profiles : []
+            profilesDirectory: root.pointerProfiles.directory
+            profilesStatus: root.pointerProfiles.loading ? "Looking for macOS profiles…" : root.pointerProfiles.error
             onApplyRequested: function(value) { root.applyPointerFeel(value) }
             onRestoreRequested: root.restorePointerFeel()
             onBackRequested: { root.editingCurve = false; keyCatcher.forceActiveFocus() }
@@ -1053,7 +1110,7 @@ Panel {
           SettingRow {
             sectionName: "pointer"
             width: parent.width
-            visible: root.activeTab === "pointer" && root.pointerFeel.profile !== "mac" && root.pointerFeel.profile !== "custom"
+            visible: root.activeTab === "pointer" && !Curve.usesCurve(root.pointerFeel.profile)
             implicitHeight: pointerContent.implicitHeight + Style.space(28)
             Column {
               id: pointerContent
@@ -1223,7 +1280,10 @@ Panel {
                 font.pixelSize: Style.font.body
               }
               Text {
-                text: ({ adaptive: "System", flat: "Flat", mac: "Mac-inspired", custom: "Custom" })[root.pointerFeel.profile] + " · Presets and acceleration curve"
+                width: parent.parent.width - Style.space(20)
+                elide: Text.ElideRight
+                text: Curve.label(root.pointerFeel) + (root.pointerFeel.profile !== "imported" ? " · Presets and acceleration curve"
+                  : root.pointerDrift ? " · Display scale changed, re-apply" : "")
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption

@@ -150,9 +150,9 @@ function context() {
   const ctx = context();
   ctx.actionProc.running = true;
   const original = JSON.stringify(ctx.pointerFeel);
-  ctx.applyPointerFeel({profile: 'mac', curve: ctx.Curve.defaults()});
+  ctx.applyPointerFeel({profile: 'custom', curve: ctx.Curve.defaults()});
   assert.equal(ctx.devices[0].settings.accel_profile, 'custom');
-  assert.equal(ctx.pointerFeel.profile, 'mac');
+  assert.equal(ctx.pointerFeel.profile, 'custom');
   ctx.selectDevice('dell');
   assert.equal(ctx.pointerFeel.profile, 'adaptive');
   assert.equal(ctx.previousFeels.dell, undefined);
@@ -176,6 +176,95 @@ function context() {
   const backendExpression = qml.match(/readonly property string backend: (.*)/)[1];
   ctx.Qt = {resolvedUrl: () => 'file:///tmp/plugin%20with%20spaces/trackpads.py'};
   assert.equal(vm.runInContext(backendExpression, ctx), '/tmp/plugin with spaces/trackpads.py');
+}
+
+// The former Mac-inspired preset is an ordinary curve, shown and undone as Custom.
+{
+  const Curve = require('./Curve.js');
+  const curve = {precision: 0.2, start: 0.8, end: 2.8, fast: 1};
+  const feel = Curve.fromSettings({accel_profile: 'custom', curve_preset: 'mac', curve});
+  assert.equal(feel.profile, 'custom');
+  assert.deepEqual(feel.curve, curve);
+  assert.equal(Curve.label(feel), 'Custom');
+  assert.ok(Curve.usesCurve('mac'), 'an earlier undo record still restores as a curve');
+  const ctx = context();
+  ctx.actionProc.running = true;
+  ctx.previousFeels.apple = {profile: 'mac', curve};
+  ctx.restorePointerFeel();
+  assert.equal(ctx.devices[0].settings.accel_profile, 'custom');
+  assert.equal(ctx.pointerFeel.profile, 'custom');
+}
+
+// macOS profiles: a previewed file is applied by reference and undone by its converted curve.
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  const reference = {file: 'mac.json', sha256: 'a'.repeat(64), name: 'MacBook Pro (M1 Pro)', tracking_speed: 1.5};
+  ctx.applyPointerFeel({profile: 'imported', curve: ctx.Curve.defaults(), imported: reference});
+  assert.deepEqual(ctx.pendingActions[0].value.imported, {file: 'mac.json', sha256: 'a'.repeat(64), tracking_speed: 1.5},
+    'the backend receives the file reference and tracking speed, not the display name');
+  const settings = ctx.devices[0].settings;
+  assert.equal(settings.accel_profile, 'custom');
+  assert.equal(settings.curve_preset, 'imported');
+  assert.equal(ctx.pointerFeel.profile, 'imported');
+  assert.equal(ctx.Curve.label(ctx.pointerFeel), 'macOS · MacBook Pro (M1 Pro)');
+  ctx.deviceSettingsOpen = false;
+  ctx.activeTab = 'pointer';
+  assert.ok(!ctx.navigationSections().includes('pointer'), 'Pointer Speed is hidden for an imported curve');
+  ctx.pointerSpeed = 0.1;
+  ctx.adjustPointerSpeed(0.2);
+  assert.equal(ctx.pointerSpeed, 0.1);
+  ctx.applyPointerFeel({profile: 'flat', curve: ctx.Curve.defaults()});
+  assert.equal(settings.imported_curve, undefined, 'leaving the profile drops its local curve');
+  assert.equal(settings.curve_preset, 'custom');
+}
+
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  const converted = {name: 'Mac', file: 'mac.json', sha256: 'b'.repeat(64), tracking_speed: 0.875,
+    mm_per_point: 0.2, px_per_point: 1, devices: {apple: {units_per_mm: 98.65, step: 0.1, points: [0, 1]}}};
+  ctx.devices[0].settings = {...ctx.devices[0].settings, accel_profile: 'custom', curve_preset: 'imported',
+    curve: ctx.Curve.defaults(), imported_curve: converted};
+  ctx.devices[0].imported_drift = true;
+  ctx.loadSelection();
+  assert.equal(ctx.pointerDrift, true);
+  ctx.applyPointerFeel({profile: 'adaptive', curve: ctx.Curve.defaults()});
+  assert.equal(ctx.pointerDrift, false, 'a new feel clears the drift notice locally');
+  ctx.restorePointerFeel();
+  assert.deepEqual(ctx.pendingActions[1].value.imported, converted, 'undo needs no profile file');
+  assert.equal(ctx.devices[0].settings.curve_preset, 'imported');
+  assert.ok(ctx.Curve.same(ctx.pointerFeel, {profile: 'imported', curve: ctx.Curve.defaults(),
+    imported: {file: 'mac.json', sha256: 'b'.repeat(64), tracking_speed: 0.875}}), 'a reference equals its converted curve');
+  assert.ok(!ctx.Curve.same(ctx.pointerFeel, {profile: 'imported', curve: ctx.Curve.defaults(),
+    imported: {file: 'mac.json', sha256: 'b'.repeat(64), tracking_speed: 1}}), 'another tracking speed is a change');
+}
+
+{
+  const ctx = context();
+  ctx.profilesProc = {running: false};
+  ctx.editingCurve = true;
+  ctx.pointerProfiles = {loading: false, error: '', directory: '', profiles: []};
+  ctx.profilesRequest = 0;
+  ctx.refreshProfiles();
+  assert.deepEqual(Array.from(ctx.profilesProc.command), ['timeout', '-k', '2', '15', 'python3', 'trackpads.py', 'profiles', 'apple']);
+  const first = ctx.profilesProc.requestId;
+  ctx.refreshProfiles();
+  assert.equal(ctx.profilesPending, true, 'an overlapping open waits for the running read');
+  ctx.profilesProc.running = false;
+  ctx.finishProfiles(0, first);
+  assert.equal(ctx.profilesProc.running, true);
+  ctx.receiveProfiles(JSON.stringify({profiles: [{file: 'old.json'}]}), first);
+  assert.equal(ctx.pointerProfiles.loading, true, 'a superseded reply is dropped');
+  ctx.receiveProfiles(JSON.stringify({directory: '/p', profiles: [{file: 'new.json'}],
+    context: {interfaces: {apple: {units_per_mm: 98.65}}, monitor: {name: 'eDP-1'}}}), ctx.profilesProc.requestId);
+  assert.equal(ctx.pointerProfiles.profiles[0].file, 'new.json');
+  assert.equal(ctx.pointerProfiles.device, 'apple');
+  ctx.profilesProc.running = false;
+  ctx.refreshProfiles();
+  ctx.profilesProc.running = false;
+  ctx.finishProfiles(124, ctx.profilesProc.requestId);
+  assert.match(ctx.pointerProfiles.error, /Could not read pointer profiles/, 'a timed-out read reports an error');
 }
 
 {
