@@ -1,0 +1,112 @@
+# macOS pointer profiles
+
+Bring the exact trackpad acceleration of a Mac you like to Trackpad Plus on Omarchy. No
+recording session is needed: macOS publishes its acceleration curves in the I/O Registry,
+and the algorithm that applies them is open source. A 30-second check confirms the few
+constants that live in Apple's closed multitouch driver.
+
+## Workflow
+
+On the Mac (system `python3` and Xcode's `swiftc`; no permissions are requested):
+
+```sh
+python3 tools/macos/export-profile.py          # writes <model>-tracking-<speed>.json
+swiftc -O tools/macos/probe.swift -o /tmp/trackpad-probe
+/tmp/trackpad-probe probe.csv                  # move one finger slow → fast for 30 s
+python3 tools/macos/export-profile.py --check probe.csv --profile <model>-tracking-<speed>.json --write
+python3 tools/macos/export-profile.py --preview <model>-tracking-<speed>.json --hyprland-scale 2
+```
+
+The export records the curves, the current **Tracking speed**, and the built-in display's
+size so the cursor can travel the same physical distance on Linux. `--check` measures the
+pointer event rate, whether counts are whole numbers, Apple's per-event accelerator, and the
+static curve against real strokes; `--write` stores those constants only when the check
+passes. `--preview` prints the libinput curve and its error against macOS.
+
+On Omarchy, copy the profile to `~/.config/trackpad-plus/profiles/` and choose it under
+**Pointer feel → macOS**. A profile for a MacBook Pro 14" (M1 Pro) at tracking speed 0.875,
+exported and checked on 2026-09-30, is in `profiles/`.
+
+## How macOS accelerates a trackpad
+
+Sources: Apple's [IOHIDFamily-2115.140.4](https://github.com/apple-oss-distributions/IOHIDFamily/tree/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns)
+(macOS 15); `hidutil dump services` shows the built-in trackpad using exactly this path
+(`IOHIDPointerAccelerator`, Rate 120, Resolution 400 → `IOHIDParametricAcceleration`).
+
+1. The multitouch driver reports relative motion in whole counts at
+   `HIDPointerResolution` = 400 per inch, about 123 events per second.
+2. [`IOHIDPointerAccelerator::accelerate`](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDAcceleration.cpp#L136-L171)
+   takes one event at a time, with no smoothing or history beyond the last timestamp:
+   `V = floor(|Δ|)` counts, scaled down only if the event is later than the 120 Hz
+   `HIDPointerReportRate` period, and multiplies `Δ` by `multiplier(V) / V`.
+3. [`IOHIDParametricAcceleration::multiplier`](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDAccelerationAlgorithm.cpp#L211-L256)
+   evaluates `x = V × 67 / 400` — the filter passes a fixed
+   [`FRAME_RATE` of 67](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDAcceleration.hpp#L30)
+   ([call](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDPointerScrollFilter.cpp#L647-L668)),
+   not the report rate — and returns `f(x) × 96/67` points
+   ([`kCursorScale`](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDAccelerationAlgorithm.hpp#L23)).
+4. `f` comes from the device's `HIDAccelCurves`
+   ([setup](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDAccelerationAlgorithm.cpp#L111-L205)):
+   `lin·x + (par·x)² + (cub·x)³ + (quart·x)⁴` up to `TangentSpeedLinear`, the tangent line
+   up to `TangentSpeedParabolicRoot`, then `sqrt(m₁·x + b₁)`. Gains are raised together with
+   the speed — `(g·x)ⁿ`, not `g·xⁿ`. Tracking speeds between the stored notches interpolate
+   every parameter linearly.
+
+For steady finger speed `v` (in/s), counts per event are `400·v/r`, so the cursor moves
+`T(v) = (96·r/67)·f(67·v/r)` points per second at event rate `r`. `pointer_profiles.py`
+implements each step; `test_pointer_profiles.py` checks it against a simulation of Apple's
+per-event code.
+
+## How Linux receives it
+
+- libinput's custom profile takes **raw trackpad units per millisecond** at the x-axis
+  resolution and returns logical pixels per millisecond: speed is one event's distance over
+  the time since the previous one
+  ([libinput 1.31.3 `filter-custom.c` L131](https://sources.debian.org/src/libinput/1.31.3-1/src/filter-custom.c/#L131)),
+  points are interpolated linearly and extrapolated from the last two
+  ([L152](https://sources.debian.org/src/libinput/1.31.3-1/src/filter-custom.c/#L152)), at most
+  [64 points](https://sources.debian.org/src/libinput/1.31.3-1/src/libinput-private.h/#L341).
+- Hyprland applies libinput's deltas unchanged, in logical pixels.
+- On Asahi the MacBook Pro 14" trackpad is `apple-spi-trackpad`, with 12312 units over the
+  same 124.80 mm sensor macOS reports: **98.65 units/mm**.
+
+The converter samples `T` as 64 points whose last two lie on Apple's tangent line, so
+libinput's extrapolation is exact up to the square-root knee, and scales points to pixels so
+the cursor covers the same physical distance on the same panel. For this Mac's profile at
+98.65 units/mm the libinput curve is within **1.8 % of macOS from 6 to 600 mm/s** (4.9 % at
+3–6 mm/s, 8.3 % at 1.5–3 mm/s; flicks above 800 mm/s run up to 8 % fast).
+
+## What the check found on this Mac
+
+| Measurement | Result |
+| --- | --- |
+| Apple's accelerator, event by event | median error 0.03 % (1843 events) |
+| Pointer event rate | 123.4 Hz (not the 120 Hz `HIDPointerReportRate`) |
+| Counts | whole numbers at 400 per inch |
+| Static curve vs real strokes, 15–254 mm/s | within ±1.4 % |
+
+**Why the probe avoids MultitouchSupport.** Reading raw frames through the private
+MultitouchSupport framework (`MTDeviceStart`) changes macOS while it runs: in blind A/B runs
+the pointer felt laggy and too fast. Measured, pointer events trailed the raw frames by
+10–14 ms, and counts arrived in bursts that the convex curve accelerates 6–8 % more at slow
+speeds, although Apple's accelerator still matched every event. The probe therefore uses
+AppKit's public `NSTouch`, which leaves the pointer feeling native.
+
+## What a curve cannot copy
+
+- **Stroke starts.** macOS gives the first event after a pause near-minimum gain. libinput's
+  custom profile times it from the previous stroke, or assumes 7 ms after a second of idle
+  ([`custom_accelerator_restart`](https://sources.debian.org/src/libinput/1.31.3-1/src/filter-custom.c/#L267)
+  is a no-op), so a landing finger can jump. This needs a libinput fix upstream.
+- **Count quantisation.** Apple's 400-per-inch counts make the slowest gains slightly
+  stepped; libinput sees about 6× finer motion, so the converter matches the average.
+- **Latency and smoothing** before the accelerator differ between the two stacks.
+
+## Credits
+
+[iam4x/omarchy-macbookpro-m1-trackpad](https://github.com/iam4x/omarchy-macbookpro-m1-trackpad)
+first carried Apple's curve to Hyprland on this laptop; it treats the curve's input as true
+inches per second, which runs up to 65 % fast at everyday speeds.
+[ReneXiong/macos-trackpad-libinput](https://github.com/ReneXiong/macos-trackpad-libinput)
+applied the 67/120 rescaling. This implementation is independent and follows Apple's and
+libinput's sources above.
