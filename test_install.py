@@ -84,7 +84,7 @@ else:
     def macos_profile(self):
         profiles = self.root / 'config/trackpad-plus/profiles'
         profiles.mkdir(parents=True)
-        source = self.plugin / 'tools/macos/profiles/MacBookPro18-3-tracking-0.875.json'
+        source = self.plugin / 'tools/macos/profiles/MacBookPro18-3.json'
         shutil.copy2(source, profiles / source.name)
         self.env['XDG_CONFIG_HOME'] = str(self.root / 'config')
         self.call('state')
@@ -92,13 +92,13 @@ else:
         self.call('set', 'apple', 'units_per_mm', json.dumps(units))
         return source.name
 
-    def test_installed_copy_lists_macos_profiles_with_previews(self):
+    def test_installed_copy_lists_macos_profiles(self):
         name = self.macos_profile()
         listed = self.call('profiles', 'apple')
         self.assertEqual([row['file'] for row in listed['profiles']], [name])
         row = listed['profiles'][0]
         self.assertNotIn('error', row)
-        self.assertEqual(len(row['preview']['plot']), 41)
+        self.assertEqual(len(row['speeds']), 10)
         self.assertEqual(listed['context']['monitor']['name'], 'eDP-1')
         self.assertFalse((self.root / 'eval.log').exists() and 'custom' in (self.root / 'eval.log').read_text())
 

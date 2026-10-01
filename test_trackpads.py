@@ -15,7 +15,7 @@ from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('trackpads',Path(__file__).with_name('trackpads.py'))
 m=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-MAC_PROFILE = Path(__file__).with_name('tools') / 'macos' / 'profiles' / 'MacBookPro18-3-tracking-0.875.json'
+MAC_PROFILE = Path(__file__).with_name('tools') / 'macos' / 'profiles' / 'MacBookPro18-3.json'
 PANEL = [{'name': 'eDP-1', 'width': 3024, 'height': 1890, 'scale': 2.0, 'physicalWidth': 302, 'focused': True}]
 try:
     ctypes.CDLL('libinput.so.10')
@@ -672,7 +672,8 @@ class TrackpadTests(unittest.TestCase):
         self.assertEqual(settings['accel_profile'], 'custom')
         self.assertEqual(settings['curve_preset'], 'imported')
         self.assertEqual(settings['curve'], m.DEFAULT_CURVE)  # the custom curve is kept for later
-        self.assertEqual(imported['name'], 'MacBook Pro (M1 Pro) · Tracking 0.875')
+        self.assertEqual(imported['name'], 'MacBook Pro (M1 Pro)')
+        self.assertEqual(imported['tracking_speed'], 0.875)  # the Mac's own setting by default
         self.assertEqual(imported['px_per_point'], round(301.21 / 1512 * 3024 / 2 / 302, 6))
         self.assertEqual(set(imported['devices']), {'apple-inc.-magic-trackpad', 'apple-inc.-magic-trackpad-1'})
         device = imported['devices']['apple-inc.-magic-trackpad']
@@ -688,6 +689,28 @@ class TrackpadTests(unittest.TestCase):
         self.assertNotIn('units_per_mm', lua)
         self.assertEqual(state['devices']['apple']['previous_pointer_feel']['profile'], 'adaptive')
         self.assertEqual(m.migrate(state), state)
+
+    def test_tracking_speed_selects_apples_curve_for_that_slider_position(self):
+        self.profiles_dir()
+        group = {'id': 'apple', 'label': 'Apple', 'names': ['apple-spi-trackpad'], 'settings': {}}
+        profile = m.pointer_profiles.load_profile(MAC_PROFILE.read_bytes())
+        with patch.object(m, 'machine_model', return_value='Apple MacBook Pro (14-inch, M1 Pro, 2021)'):
+            default = m.import_profile(group, self.reference(), PANEL[0])
+            same = m.import_profile(group, dict(self.reference(), tracking_speed=0.875), PANEL[0])
+            faster = m.import_profile(group, dict(self.reference(), tracking_speed=1.5), PANEL[0])
+        self.assertEqual(same, default)
+        self.assertEqual(faster['tracking_speed'], 1.5)
+        scale = m.profile_scale(m.pointer_profiles.mm_per_point(profile), PANEL[0])
+        expected = m.pointer_profiles.convert(dict(profile, tracking_speed=1.5), 12312 / 124.8, scale)
+        self.assertEqual(faster['devices']['apple-spi-trackpad']['points'], expected['points'])
+        self.assertGreater(faster['devices']['apple-spi-trackpad']['points'][10],
+                           default['devices']['apple-spi-trackpad']['points'][10])
+        m.validate_change('pointer_feel', {'profile': 'imported', 'curve': m.DEFAULT_CURVE,
+                                           'imported': dict(self.reference(), tracking_speed=3)})
+        for bad in (3.5, -0.1, True, '1'):
+            with self.assertRaises(ValueError):
+                m.validate_change('pointer_feel', {'profile': 'imported', 'curve': m.DEFAULT_CURVE,
+                                                   'imported': dict(self.reference(), tracking_speed=bad)})
 
     def test_builtin_resolution_is_used_for_known_macbooks(self):
         self.profiles_dir()
@@ -742,7 +765,7 @@ class TrackpadTests(unittest.TestCase):
         self.assertEqual(settings['curve_preset'], 'imported')
         self.assertEqual(state['devices']['apple']['previous_pointer_feel']['profile'], 'custom')
 
-    def test_profiles_command_previews_valid_files_and_reports_bad_ones(self):
+    def test_profiles_command_lists_valid_files_and_reports_bad_ones(self):
         directory = self.profiles_dir()
         (directory / 'broken.json').write_text('{"format": "nope"}')
         (directory / 'notes.txt').write_text('ignored')
@@ -756,9 +779,9 @@ class TrackpadTests(unittest.TestCase):
         self.assertIn('error', rows['broken.json'])
         good = rows[MAC_PROFILE.name]
         self.assertEqual(good['sha256'], self.reference()['sha256'])
-        self.assertTrue(good['verified'].startswith('probe '))
-        self.assertEqual(len(good['preview']['plot']), 41)
-        self.assertLessEqual(good['preview']['error_bands']['6-600'], 2)
+        self.assertEqual(good['name'], 'MacBook Pro (M1 Pro)')
+        self.assertEqual(good['tracking_speed'], 0.875)
+        self.assertEqual(good['speeds'], [0, 0.125, 0.5, 0.6875, 0.875, 1, 1.5, 2, 2.5, 3])
         interfaces = result['context']['interfaces']
         self.assertEqual(interfaces['apple-inc.-magic-trackpad'], {'units_per_mm': 47.6, 'source': 'setting'})
         self.assertEqual(interfaces['apple-inc.-magic-trackpad-1'], {'units_per_mm': None, 'source': None})

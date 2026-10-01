@@ -3,7 +3,7 @@
 
 Run on macOS with the system python3; no permissions or extra packages are needed:
 
-    python3 tools/macos/export-profile.py            # writes <model>-tracking-<speed>.json
+    python3 tools/macos/export-profile.py            # writes <model>.json
     python3 tools/macos/export-profile.py --list     # shows the trackpads that can be exported
     python3 tools/macos/export-profile.py --preview PROFILE --units-per-mm 98.65 --hyprland-scale 2
 
@@ -87,8 +87,8 @@ def export(device):
         raise SystemExit('Trackpad acceleration is turned off on this Mac; there is no curve to export.')
     hardware = json.loads(run('system_profiler', 'SPHardwareDataType', '-json'))['SPHardwareDataType'][0]
     chip = hardware.get('chip_type', '').removeprefix('Apple ')
-    name = f"{hardware.get('machine_name', 'Mac')} ({chip}) · Tracking {speed:g}" if chip \
-        else f"{hardware.get('machine_name', 'Mac')} · Tracking {speed:g}"
+    # The tracking speed is only the default; Trackpad Plus offers the same slider.
+    name = f"{hardware.get('machine_name', 'Mac')} ({chip})" if chip else hardware.get('machine_name', 'Mac')
     resolution = device['HIDPointerResolution'] / pp.FIXED
     rate = device['HIDPointerReportRate']
     version = run('sw_vers', '-productVersion').decode().strip()
@@ -220,7 +220,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--list', action='store_true', help='list trackpads with parametric curves')
     parser.add_argument('--device', type=int, default=0, help='trackpad number from --list (default: built-in)')
-    parser.add_argument('--output', type=Path, help='profile path (default: <model>-tracking-<speed>.json)')
+    parser.add_argument('--output', type=Path, help='profile path (default: <model>.json)')
     parser.add_argument('--preview', type=Path, metavar='PROFILE', help='print the libinput curve for a profile')
     parser.add_argument('--units-per-mm', type=float, default=98.65,
                         help='Linux trackpad resolution (default: 98.65, MacBook Pro 14/16 M1 Pro/Max)')
@@ -270,7 +270,7 @@ def main():
     if not 0 <= args.device < len(devices):
         raise SystemExit(f'Choose --device 0 to {len(devices) - 1}; see --list.')
     profile = export(devices[args.device])
-    stem = re.sub(r'[^A-Za-z0-9.]+', '-', f"{profile['source']['model'] or 'mac'}-tracking-{profile['tracking_speed']:g}")
+    stem = re.sub(r'[^A-Za-z0-9.]+', '-', profile['source']['model'] or 'mac')
     output = args.output or Path(f'{stem}.json')
     output.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + '\n')
     print(f"Wrote {output} — {profile['name']}, {len(profile['curves'])} curves.")

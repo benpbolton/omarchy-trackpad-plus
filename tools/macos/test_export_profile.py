@@ -13,7 +13,7 @@ spec = importlib.util.spec_from_file_location('export_profile', HERE / 'export-p
 e = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(e)
 pp = e.pp
-PROFILE = HERE / 'profiles' / 'MacBookPro18-3-tracking-0.875.json'
+PROFILE = HERE / 'profiles' / 'MacBookPro18-3.json'
 
 
 def recording(path, burst=0.0, rate=123.4, seed=7):

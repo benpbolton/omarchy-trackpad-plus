@@ -2,7 +2,7 @@
   "format": "trackpad-plus/pointer-profile",
   "version": 1,
   "kind": "apple-parametric",
-  "name": "MacBook Pro (M1 Pro) · Tracking 0.875",
+  "name": "MacBook Pro (M1 Pro)",
   "tracking_speed": 0.875,
   "curves": [
     {

@@ -23,7 +23,7 @@ PANEL = {'width': 3024, 'scale': 2, 'physicalWidth': 301.2}
 def profile(**changes):
     value = {
         'format': p.FORMAT, 'version': 1, 'kind': 'apple-parametric',
-        'name': 'MacBook Pro (M1 Pro) · Tracking 0.875', 'tracking_speed': 0.875,
+        'name': 'MacBook Pro (M1 Pro)', 'tracking_speed': 0.875,
         'curves': [dict(zip(('index', 'linear', 'parabolic', 'cubic', 'tangent_linear', 'tangent_root'), row),
                         quartic=0) for row in MACBOOK_CURVES],
         'driver': {'resolution_dpi': 400, 'report_rate_hz': 120, 'event_rate_hz': 120,

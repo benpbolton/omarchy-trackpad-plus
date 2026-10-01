@@ -453,6 +453,9 @@ def import_profile(group, reference, monitor=None):
     if pointer_profiles.digest(raw) != reference['sha256']:
         raise ValueError('The pointer profile changed after it was previewed; choose it again')
     profile = pointer_profiles.load_profile(raw)
+    if 'tracking_speed' in reference:
+        # The macOS Tracking speed slider: Apple interpolates its own curves for any value.
+        profile = dict(profile, tracking_speed=reference['tracking_speed'])
     millimetres = pointer_profiles.mm_per_point(profile)
     scale = profile_scale(millimetres, monitor or panel_monitor())
     model = machine_model()
@@ -474,7 +477,7 @@ def import_profile(group, reference, monitor=None):
 
 
 def list_profiles(group):
-    """Previews for the profiles directory, converted for this group's first known interface."""
+    """Profiles in the profiles directory; each must convert for this group's first known interface."""
     model = machine_model()
     interfaces = {}
     for name in group['names']:
@@ -491,13 +494,14 @@ def list_profiles(group):
         try:
             raw = read_profile(name)
             profile = pointer_profiles.load_profile(raw)
-            row.update(name=profile['name'], sha256=pointer_profiles.digest(raw),
-                       tracking_speed=profile['tracking_speed'], source=profile['source'].get('os', ''),
-                       verified=profile['driver']['verified'])
             if primary and 'error' not in monitor:
-                result = pointer_profiles.convert(profile, interfaces[primary]['units_per_mm'],
-                                                  profile_scale(pointer_profiles.mm_per_point(profile), monitor))
-                row['preview'] = {'plot': result['plot'], 'error_bands': result['error_bands']}
+                # Refuse a profile here, not at Apply, if it cannot fit libinput's custom range.
+                pointer_profiles.convert(profile, interfaces[primary]['units_per_mm'],
+                                         profile_scale(pointer_profiles.mm_per_point(profile), monitor))
+            # The tracking speeds are Apple's notches: the macOS slider's stops.
+            row.update(name=profile['name'], sha256=pointer_profiles.digest(raw),
+                       tracking_speed=profile['tracking_speed'],
+                       speeds=[curve['index'] / pointer_profiles.FIXED for curve in profile['curves']])
         except (ValueError, OSError, UnicodeDecodeError) as exc:
             row['error'] = str(exc)[:200]
         rows.append(row)
@@ -609,11 +613,14 @@ def validate_change(option, value):
     validate_curve(value['curve'])
     if imported:
         reference = value['imported']
-        # Applying names a previewed file; undo carries the converted curve itself.
-        if isinstance(reference, dict) and set(reference) == {'file', 'sha256'}:
+        # Applying names a previewed file and optionally a tracking speed; undo carries the
+        # converted curve itself.
+        if isinstance(reference, dict) and set(reference) in ({'file', 'sha256'}, {'file', 'sha256', 'tracking_speed'}):
             if not isinstance(reference['file'], str) or not PROFILE_FILE.fullmatch(reference['file']) \
                     or not isinstance(reference['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', reference['sha256']):
                 raise ValueError('Invalid pointer profile reference')
+            if 'tracking_speed' in reference:
+                pointer_profiles.number(reference['tracking_speed'], 0, 3)
         else:
             validate_imported(reference)
 
