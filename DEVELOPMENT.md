@@ -27,6 +27,8 @@ This release identifier is separate from the backend's settings schema version.
 
 - `Panel.qml`: Omarchy bar widget, device selection, debounced action queue,
   deadlines, and rejection of stale reads.
+- `ScrollFeelEditor.qml` / `Scroll.js`: the Scroll feel editor (Linear or a macOS profile's
+  measured scrolling at a Scrolling speed). Only Apply changes scrolling.
 - `CurveEditor.qml` / `Curve.js`: draft curve editing, spinners, profiles, the
   macOS Tracking speed slider, and target practice. Only Apply changes the live
   profile.
@@ -129,6 +131,15 @@ previous needs no file. Resolutions come from `KNOWN_RESOLUTIONS` (keyed by
 compositor name and devicetree model) or the group's `units_per_mm` metadata;
 Apply refuses an interface without one. State rows report `imported_drift` when
 the Hyprland scale no longer matches the conversion.
+Schema 6 adds macOS scrolling. A `scroll_feel` change sends `{"profile": "imported",
+"imported": {"file", "sha256", "scroll_speed"}}` (or `{"profile": "linear"}`); the backend
+converts the profile's measured scrolling per interface with `scroll_profiles.convert` and
+stores it as `imported_scroll`, with the model behind it (`model`) for the compositor plugin.
+Each interface then gets its own `scroll_points` and `scroll_factor = 1`; the Linear scroll
+factor and natural scrolling are kept. libinput applies scroll curves only with the custom
+profile, so a System or Flat pointer feel leaves macOS scrolling inactive
+(`imported_scroll_inactive`). Undo records carry the converted scrolling, and
+`imported_scroll_drift` reports a changed Hyprland scale.
 Do not change saved group IDs or historical state paths without a migration.
 
 ## Complete automated suite
@@ -142,6 +153,8 @@ python3 test_pointer_profiles.py
 python3 tools/macos/test_export_profile.py
 python3 test_scroll_profiles.py
 python3 tools/macos/test_scroll_check.py
+QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=basic QT_QUICK_BACKEND=software QT_QUICK_CONTROLS_STYLE=Basic \
+  /usr/lib/qt6/bin/qmltestrunner -input tst_scroll.qml
 python3 test_gestures.py
 node test-selection.js
 node test-overview-model.js

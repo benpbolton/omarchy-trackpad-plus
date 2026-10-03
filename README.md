@@ -46,6 +46,8 @@ gestures apply across trackpads.
   Mac's own trackpad acceleration, with the same Tracking speed slider.
 - Visual acceleration editor with draggable precision, acceleration start/end, and fast-swipe
   handles, keyboard adjustment, target practice, and Restore previous.
+- Scroll feel: Linear, or **macOS**, which applies a Mac's measured scroll acceleration with
+  the same Scrolling speed setting.
 - Natural scrolling, tap to click, disable while typing, and clickfinger behavior.
 - Keyboard navigation through device selection, sliders, and switches.
 
@@ -408,6 +410,27 @@ Good to know:
   (at most 32 files). Each must be a regular file owned by you and not writable by
   others; the directory may be a Stow link. Applying stores the converted curve,
   so editing or deleting the file never changes the live feel.
+
+### macOS scrolling
+
+**Scrolling → Scroll feel → macOS** applies Apple's scroll acceleration while your fingers
+move, from a profile whose scrolling was measured on its Mac. The only settings are
+**Scrolling speed**, which moves between Apple's own stops and starts at the Mac's setting,
+and **Natural Scrolling**, which stays off unless you turn it on.
+
+1. On the Mac, add the scroll curves to the profile and record the two-minute scroll check;
+   [tools/macos/README.md](tools/macos/README.md) has the commands, and
+   [tasks/todo-mac.md](tasks/todo-mac.md) walks an agent through the session. The included
+   MacBook Pro 14" (M1 Pro) profile already has measured scrolling.
+2. Copy the profile to `~/.config/trackpad-plus/profiles/` as above.
+3. With **Pointer feel** set to macOS or Custom, open **Scroll feel**, choose macOS, set
+   Scrolling speed, and press **Apply & try**. libinput applies a scroll curve only with a
+   custom pointer curve; with System or Flat, macOS scrolling stays saved but inactive.
+
+What it copies today: the scroll distance for each finger speed, including macOS's rounding
+of every event up to a whole point. What it cannot copy yet: the glide after a flick, which
+apps on Linux still generate themselves, and the history Apple's accelerator keeps within a
+stroke. A compositor plugin for both is in development.
 
 ## David's MacBook Air M2 settings
 
