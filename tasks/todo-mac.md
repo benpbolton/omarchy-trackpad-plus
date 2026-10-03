@@ -43,6 +43,9 @@ Read it before troubleshooting.
   macOS/Swift version. Run the test commands in step 1 before every push.
 - Don't edit Linux runtime files (`trackpads.py`, `*.qml`, `gestures.py`, …). Don't open, merge or
   rebase pull requests. Don't touch `feat/macos-pointer-profiles`.
+- Push only to the fork, `benpbolton/omarchy-trackpad-plus`, never to `davefano`. Remote names
+  differ by checkout: on the Mac, `origin` is `davefano` and the fork is `fork`. Commands below
+  write the fork's remote name as `FORK`.
 
 ## 0. Preconditions
 
@@ -51,10 +54,13 @@ sysctl -n hw.model                 # expect MacBookPro18,3
 sw_vers                            # record in the results
 swiftc --version                   # Xcode or Command Line Tools; record it
 python3 --version                  # system python3 is fine (stdlib only)
-git -C "$(git rev-parse --show-toplevel)" remote get-url origin   # …benpbolton/omarchy-trackpad-plus…
+git remote -v | grep 'benpbolton/omarchy-trackpad-plus.*(push)'   # its name is FORK below
+ls /tmp/smoke.csv /tmp/scroll*.csv 2>/dev/null   # must print nothing: step 7b uploads every match
 ```
 
 - **Stop condition:** a different Mac model. The checked profile belongs to `MacBookPro18,3`.
+- **Stop condition:** no remote points at `benpbolton/omarchy-trackpad-plus`.
+- Move recordings left from an earlier session out of `/tmp` first.
 - If `swiftc` is missing, ask the person to run `xcode-select --install`, and wait.
 - Use the built-in display, lid open, ideally with no external display attached. The probe fills the
   built-in screen.
@@ -64,7 +70,7 @@ git -C "$(git rev-parse --show-toplevel)" remote get-url origin   # …benpbolto
 From the repository root:
 
 ```sh
-git fetch origin
+git fetch FORK
 git switch feat/macos-scrolling-wip
 git pull --ff-only
 python3 test_pointer_profiles.py
@@ -120,7 +126,10 @@ ioreg -l -w0 | grep -E '"(HIDScroll[A-Za-z]*|ScrollMomentumDispatchRate|HIDTrack
   | sed -E 's/^[ |+-]*//' | sort -u > /tmp/ioreg-scroll.txt
 hidutil dump services > /tmp/hidutil-services.txt
 grep -n -B3 -A16 'IOHIDScrollAccelerator' /tmp/hidutil-services.txt > /tmp/hidutil-scroll.txt
+# hidutil prints XML, with each value on the line after its key: drop identifier keys with their values.
+sed -i '' -E '/<key>[^<]*([Ss][Ee][Rr][Ii][Aa][Ll]|[Uu][Uu][Ii][Dd])[^<]*<\/key>/{N;d;}' /tmp/hidutil-scroll.txt
 grep -i -E 'serial|uuid' /tmp/ioreg-scroll.txt /tmp/hidutil-scroll.txt   # must print nothing; delete such lines if it does
+grep -E '[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}' /tmp/ioreg-scroll.txt /tmp/hidutil-scroll.txt   # same
 ```
 
 Read `/tmp/hidutil-scroll.txt`. It should show `IOHIDScrollAccelerator` objects with a `Resolution`
@@ -167,11 +176,15 @@ In S rows, field 25 is `hid_raw_y` and field 27 is `hid_accel_y` (field 1 is the
 | No `N` rows | no touch input | Troubleshooting D |
 | No `S` rows | the window isn't receiving scroll events | Troubleshooting D |
 
-## 5. 👤 The recording (two minutes)
+## 5. 👤 The recording (one to two minutes)
+
+The check needs at least 500 scroll events, 5 long steady strokes and 8 flicks that glide to a
+stop, which a minute of deliberate scrolling covers. Two minutes is only the limit; more glides
+give the momentum fit and the Linux replay more to work with.
 
 Tell the person, word for word if you like:
 
-> A dark full-screen page will open with instructions and coverage bars. For about two minutes,
+> A dark full-screen page will open with instructions and coverage bars. For a minute or two,
 > scroll it with two fingers and no clicks, mixing all six kinds of movement, up and down:
 > 1. very slow, careful scrolling: stop, then lift
 > 2. ordinary scrolling
@@ -181,7 +194,8 @@ Tell the person, word for word if you like:
 > 5. bursts of three or four quick flicks in the same direction
 > 6. a few sideways scrolls and flicks
 >
-> Try to fill every bar. It stops by itself after two minutes; Esc stops early.
+> Try to fill every bar. It stops by itself after two minutes. Once you've made at least a dozen
+> flicks that glide to a stop, Esc ends it early.
 
 ```sh
 /tmp/scroll-probe /tmp/scroll.csv
@@ -236,9 +250,9 @@ Don't copy anything from `/tmp/speed2.json` into the repository.
    ```
 3. Run the step-1 tests, then commit and push:
    ```sh
-   git add tasks/results-mac-scrolling.md tools/macos/profiles/MacBookPro18-3.json
+   git add -f tasks/results-mac-scrolling.md tools/macos/profiles/MacBookPro18-3.json   # the Mac excludes tasks/
    git commit -m "data(macos): measure two-finger scrolling on MacBookPro18,3"
-   git push origin feat/macos-scrolling-wip
+   git push FORK feat/macos-scrolling-wip
    ```
    If the check failed, commit the results file only. The profile must stay without a measured
    driver: either restore it with `git checkout tools/macos/profiles/MacBookPro18-3.json`, or keep
@@ -250,7 +264,9 @@ The CSVs hold only motion data and screen size. They're too big for a feature br
 on an orphan branch that is never merged:
 
 ```sh
-repo="$(git rev-parse --show-toplevel)"; url="$(git -C "$repo" remote get-url origin)"
+repo="$(git rev-parse --show-toplevel)"
+fork="$(git -C "$repo" remote -v | awk '/benpbolton\/omarchy-trackpad-plus/ && /\(push\)/ { print $1; exit }')"
+url="$(git -C "$repo" remote get-url "${fork:?no remote points at benpbolton/omarchy-trackpad-plus}")"
 data="$(mktemp -d)/data"
 if git ls-remote --exit-code --heads "$url" data/macos-scrolling >/dev/null 2>&1; then
   git clone -q --branch data/macos-scrolling "$url" "$data"
@@ -383,8 +399,8 @@ a test that pins the new behaviour and every step-1 test still passes.
 On the Linux side:
 
 ```sh
-git fetch origin && git switch feat/macos-scrolling-wip && git pull --ff-only
-git fetch origin data/macos-scrolling
+git fetch FORK && git switch feat/macos-scrolling-wip && git pull --ff-only
+git fetch FORK data/macos-scrolling
 ```
 
 Then read `tasks/results-mac-scrolling.md`. What comes next, there:
