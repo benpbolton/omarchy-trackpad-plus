@@ -1,0 +1,10 @@
+Scroll events: 45 strokes; contact events at 210.2 Hz.
+Apple's scroll accelerator, event by event against HID accelerated values: median error 25.33 % over 5419 values (2% within 0.5 %).
+Points per accelerated unit: AppKit 12.130, CGEvent 11.999; scroll view moved 1.047 points per AppKit point.
+AppKit points per unit by scroll count: 1: 10.137, 2: 10.120, 3: 11.682, 13: 11.504
+Raw units per finger mm: 15.958 from 35 strokes (interquartile spread 4.2 %).
+Release: mean of the last 50 ms × 0.915 (38 flicks, log spread 0.141); momentum starts above 421 units/s (overlaps stopped strokes).
+Momentum at 119.9 Hz, direct frames: median distance error 0.7 % over 13 glides (duration ×1.25); decay 0.975→0.91. Direct 0.7 %, table 2.0 %.
+A landing finger stops momentum after 1 ms (median of 14).
+
+FAIL: accelerator ≤1 % ✗; finger mapping within ±10 % ✓; ≥8 flicks ✓; momentum within 5 % ✓; every constant measured ✓
