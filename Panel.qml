@@ -7,6 +7,7 @@ import qs.Ui
 import qs.Commons
 import "Model.js" as Model
 import "Curve.js" as Curve
+import "Scroll.js" as Scroll
 
 Panel {
   id: root
@@ -44,6 +45,12 @@ Panel {
   property int profilesRequest: 0
   property bool profilesPending: false
   property bool editingCurve: false
+  // Scroll feel: Linear, or a macOS profile's measured scrolling.
+  property var scrollFeel: ({ profile: "linear" })
+  property var previousScrollFeels: ({})
+  property bool scrollDrift: false
+  property bool scrollInactive: false
+  property bool editingScrollFeel: false
   property bool deviceSettingsOpen: false
   property bool gestureCanEdit: false
   property bool gestureCanRestore: false
@@ -99,6 +106,13 @@ Panel {
     if (row.previous_pointer_feel) previous[selectedDevice] = row.previous_pointer_feel
     else delete previous[selectedDevice]
     previousFeels = previous
+    scrollFeel = Scroll.fromSettings(v)
+    scrollDrift = !!row.imported_scroll_drift
+    scrollInactive = !!row.imported_scroll_inactive
+    var previousScroll = Scroll.copy(previousScrollFeels)
+    if (row.previous_scroll_feel) previousScroll[selectedDevice] = row.previous_scroll_feel
+    else delete previousScroll[selectedDevice]
+    previousScrollFeels = previousScroll
     scrollScale = v.scroll_scale || Math.max(1, v.scroll_factor)
     scrollFactor = v.scroll_factor / scrollScale
     pendingScrollFactor = scrollFactor
@@ -119,7 +133,8 @@ Panel {
     var queue = pendingActions.slice()
     // Replace only consecutive writes of the same scalar; preserve profile/undo ordering.
     var last = queue.length ? queue[queue.length - 1] : null
-    if (last && last.device === selectedDevice && last.option === option && option !== "pointer_feel") {
+    if (last && last.device === selectedDevice && last.option === option && option !== "pointer_feel"
+        && option !== "scroll_feel") {
       queue.pop()
     }
     if (queue.length >= 128) {
@@ -129,7 +144,8 @@ Panel {
     }
     editGeneration++
     settingsError = ""
-    queue.push({ device: selectedDevice, option: option, value: option === "pointer_feel" ? Curve.request(value) : value })
+    queue.push({ device: selectedDevice, option: option, value: option === "pointer_feel" ? Curve.request(value)
+      : option === "scroll_feel" ? Scroll.request(value) : value })
     pendingActions = queue
     // Keep the local snapshot consistent while queued writes finish.
     for (var i = 0; i < devices.length; i++) {
@@ -143,6 +159,16 @@ Panel {
           settings.curve_preset = value.profile === "mac" || value.profile === "imported" ? value.profile : "custom"
           if (value.profile === "imported") settings.imported_curve = Curve.copy(value.imported)
           else delete settings.imported_curve
+        } else if (option === "scroll_feel") {
+          devices[i].previous_scroll_feel = Scroll.fromSettings(settings)
+          devices[i].imported_scroll_drift = false
+          if (value.profile === "imported") {
+            settings.scroll_preset = "imported"
+            settings.imported_scroll = Scroll.copy(value.imported)
+          } else {
+            delete settings.scroll_preset
+            delete settings.imported_scroll
+          }
         } else if (option === "scroll_scale") {
           var oldScale = settings.scroll_scale || Math.max(1, settings.scroll_factor)
           settings.scroll_factor = Math.round(settings.scroll_factor * value / oldScale * 1000000) / 1000000
@@ -246,7 +272,8 @@ Panel {
     var sections = ["device", "device-settings"]
     if (deviceSettingsOpen) sections.push("enable")
     sections.push("tabs")
-    if (activeTab === "scrolling") return sections.concat(["scroll", "natural"])
+    if (activeTab === "scrolling")
+      return sections.concat(["scroll-feel"], scrollFeel.profile === "linear" ? ["scroll"] : [], ["natural"])
     if (activeTab === "gestures") return sections
     if (!Curve.usesCurve(pointerFeel.profile)) sections.push("pointer")
     return sections.concat(["acceleration", "tap", "typing", "clickfinger"])
@@ -278,7 +305,7 @@ Panel {
     : "transparent"
 
   function keyboardNavigationBlocked() {
-    return editingCurve || gestureEditor.activeFocus
+    return editingCurve || editingScrollFeel || gestureEditor.activeFocus
   }
 
   function moveCursor(delta) {
@@ -316,6 +343,7 @@ Panel {
     if (focusSection === "tabs" && activeTab === "gestures") { gestureEditor.beginEditing(); return }
     if (focusSection === "device-settings") { toggleDeviceSettings(selectedDevice); return }
     if (focusSection === "acceleration") { openCurveEditor(); return }
+    if (focusSection === "scroll-feel") { openScrollFeelEditor(); return }
     if (focusSection === "enable") { toggleTouchpad(); return }
     if (focusSection === "natural") { toggleNaturalScroll(); return }
     if (focusSection === "tap") { toggleTapToClick(); return }
@@ -411,7 +439,7 @@ Panel {
   function finishProfiles(code, request) {
     if (request === profilesRequest && pointerProfiles.loading)
       pointerProfiles = { loading: false, error: "Could not read pointer profiles", directory: "", profiles: [], device: pointerProfiles.device }
-    if (profilesPending && editingCurve) refreshProfiles()
+    if (profilesPending && (editingCurve || editingScrollFeel)) refreshProfiles()
   }
 
   function applyPointerFeel(value) {
@@ -427,6 +455,29 @@ Panel {
     var value = Curve.copy(previousFeels[selectedDevice])
     applyPointerFeel(value)
     curveEditor.draft = Curve.copy(value)
+  }
+
+  function openScrollFeelEditor() {
+    if (!touchpadEnabled) return
+    selectDevice(selectedDevice) // Flush any pending speed edits first.
+    editingScrollFeel = true
+    scrollFeelEditor.begin()
+    refreshProfiles()
+  }
+
+  function applyScrollFeel(value) {
+    var previous = Scroll.copy(previousScrollFeels)
+    previous[selectedDevice] = Scroll.copy(scrollFeel)
+    previousScrollFeels = previous
+    enqueue("scroll_feel", value)
+    loadSelection()
+  }
+
+  function restoreScrollFeel() {
+    if (!previousScrollFeels[selectedDevice]) return
+    var value = Scroll.copy(previousScrollFeels[selectedDevice])
+    applyScrollFeel(value)
+    scrollFeelEditor.draft = Scroll.copy(value)
   }
 
   function toggleDeviceSettings(key) {
@@ -523,6 +574,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       editingCurve = false
+      editingScrollFeel = false
       refresh()
       if (activeTab === "gestures") refreshGestures()
       focusSection = "device"
@@ -649,7 +701,8 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(root.editingCurve ? 430 : 340))
-    contentHeight: panel.fittedContentHeight(root.editingCurve ? curveColumn.implicitHeight : column.implicitHeight)
+    contentHeight: panel.fittedContentHeight(root.editingCurve ? curveColumn.implicitHeight
+      : root.editingScrollFeel ? scrollFeelColumn.implicitHeight : column.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -708,7 +761,40 @@ Panel {
 
       ScrollView {
         anchors.fill: parent
-        visible: !root.editingCurve
+        visible: root.editingScrollFeel
+        clip: true
+        contentWidth: availableWidth
+        Column {
+          id: scrollFeelColumn
+          width: parent.width
+          spacing: Style.space(10)
+          ScrollFeelEditor {
+            id: scrollFeelEditor
+            width: parent.width
+            foreground: root.bar.foreground
+            accent: Color.accent
+            fontFamily: root.bar.fontFamily
+            uiScale: Style.space(100) / 100
+            saved: root.scrollFeel
+            deviceLabel: root.selectedLabel + " Trackpad"
+            busy: actionProc.running || root.pendingActions.length > 0
+            settingsError: root.settingsError
+            canRestore: !!root.previousScrollFeels[root.selectedDevice]
+            drift: root.scrollDrift
+            pointerReady: Curve.usesCurve(root.pointerFeel.profile)
+            profiles: root.pointerProfiles.device === root.selectedDevice ? root.pointerProfiles.profiles : []
+            profilesDirectory: root.pointerProfiles.directory
+            profilesStatus: root.pointerProfiles.loading ? "Looking for macOS profiles…" : root.pointerProfiles.error
+            onApplyRequested: function(value) { root.applyScrollFeel(value) }
+            onRestoreRequested: root.restoreScrollFeel()
+            onBackRequested: { root.editingScrollFeel = false; keyCatcher.forceActiveFocus() }
+          }
+        }
+      }
+
+      ScrollView {
+        anchors.fill: parent
+        visible: !root.editingCurve && !root.editingScrollFeel
         clip: true
         contentWidth: availableWidth
       Column {
@@ -949,10 +1035,51 @@ Panel {
           visible: root.activeTab !== "gestures"
           width: parent.width
           spacing: -1 // Adjacent row borders share exactly the same pixel.
+          // ========== Scroll feel ==========
+          SettingRow {
+            sectionName: "scroll-feel"
+            visible: root.activeTab === "scrolling"
+            width: parent.width
+            height: Style.space(58)
+            foreground: root.bar.foreground
+            fill: root.hoverFill
+            opacity: root.touchpadEnabled ? 1.0 : 0.4
+            enabled: root.touchpadEnabled
+            Column {
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(3)
+              Text {
+                text: "Scroll feel  ›"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Text {
+                width: parent.parent.width - Style.space(20)
+                elide: Text.ElideRight
+                text: Scroll.label(root.scrollFeel) + (root.scrollFeel.profile !== "imported" ? " · Scroll Speed below"
+                  : root.scrollInactive ? " · inactive with this Pointer feel"
+                  : root.scrollDrift ? " · Display scale changed, re-apply" : "")
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onContainsMouseChanged: if (containsMouse) { root.cursorActive = true; root.focusSection = "scroll-feel" }
+              onClicked: root.openScrollFeelEditor()
+            }
+          }
+
           // ========== Scroll speed slider ==========
           SettingRow {
             sectionName: "scroll"
-            visible: root.activeTab === "scrolling"
+            visible: root.activeTab === "scrolling" && root.scrollFeel.profile === "linear"
             width: parent.width
             implicitHeight: scrollContent.implicitHeight + Style.space(28)
             Column {

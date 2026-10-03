@@ -20,6 +20,7 @@ function context() {
     actionProc: { running: false }, stateProc: { running: false }, backend: 'trackpads.py',
     Model: require('./Model.js'),
     Curve: require('./Curve.js'), previousFeels: {}, curveEditor: {},
+    Scroll: require('./Scroll.js'), previousScrollFeels: {}, scrollFeelEditor: {}, editingScrollFeel: false, editingCurve: false,
     keyCatcher: { forceActiveFocus() {} },
     scrollDebounce: { running: false, stop() { this.running = false; } },
     pointerDebounce: { running: false, stop() { this.running = false; } }
@@ -425,6 +426,78 @@ function context() {
   assert.equal(ctx.keyboardNavigationBlocked(), true, 'curve editor keeps its existing focus behavior');
 }
 
+// macOS scrolling: references go to the backend, converted records come back for undo.
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  ctx.devices[0].settings.accel_profile = 'custom';
+  ctx.loadSelection();
+  assert.deepEqual(ctx.scrollFeel, {profile: 'linear'});
+  const reference = {file: 'mac.json', sha256: 'a'.repeat(64), name: 'MacBook Pro (M1 Pro)', scroll_speed: 1.5};
+  ctx.applyScrollFeel({profile: 'imported', imported: reference});
+  ctx.applyScrollFeel({profile: 'imported', imported: {...reference, scroll_speed: 2}});
+  assert.equal(ctx.pendingActions.length, 2, 'scroll feel edits are never merged, so undo order holds');
+  assert.deepEqual(ctx.pendingActions[0].value, {profile: 'imported',
+    imported: {file: 'mac.json', sha256: 'a'.repeat(64), scroll_speed: 1.5}},
+    'the backend receives the file reference and scrolling speed, not the display name');
+  const settings = ctx.devices[0].settings;
+  assert.equal(settings.scroll_preset, 'imported');
+  assert.equal(settings.scroll_factor, 0.2, 'the Linear scroll factor is kept');
+  assert.equal(ctx.scrollFeel.profile, 'imported');
+  assert.equal(ctx.Scroll.label(ctx.scrollFeel), 'macOS · MacBook Pro (M1 Pro)');
+  ctx.deviceSettingsOpen = false;
+  ctx.activeTab = 'scrolling';
+  assert.deepEqual(Array.from(ctx.navigationSections().slice(-2)), ['scroll-feel', 'natural'],
+    'Scroll Speed is hidden for macOS scrolling; Natural scrolling stays');
+  ctx.applyScrollFeel({profile: 'linear'});
+  assert.equal(settings.imported_scroll, undefined, 'Linear drops the local scrolling');
+  assert.equal(settings.scroll_preset, undefined);
+  assert.deepEqual(Array.from(ctx.navigationSections().slice(-3)), ['scroll-feel', 'scroll', 'natural']);
+}
+
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  const converted = {name: 'Mac', file: 'mac.json', sha256: 'b'.repeat(64), scroll_speed: 0.3125,
+    mm_per_point: 0.2, px_per_point: 1, devices: {apple: {units_per_mm: 98.65, step: 0.1, points: [0, 1]}},
+    model: {curve: {}, resolution: 400, report_rate_hz: 67, driver: {}}};
+  ctx.devices[0].settings = {...ctx.devices[0].settings, accel_profile: 'custom', scroll_preset: 'imported',
+    imported_scroll: converted};
+  ctx.devices[0].imported_scroll_drift = true;
+  ctx.devices[0].previous_scroll_feel = {profile: 'linear'};
+  ctx.loadSelection();
+  assert.equal(ctx.scrollDrift, true);
+  assert.deepEqual(ctx.previousScrollFeels.apple, {profile: 'linear'});
+  ctx.applyScrollFeel({profile: 'linear'});
+  assert.equal(ctx.scrollDrift, false, 'a new feel clears the drift notice locally');
+  ctx.restoreScrollFeel();
+  assert.deepEqual(ctx.pendingActions[1].value.imported, converted, 'undo needs no profile file');
+  assert.equal(ctx.devices[0].settings.scroll_preset, 'imported');
+  assert.ok(ctx.Scroll.same(ctx.scrollFeel, {profile: 'imported',
+    imported: {file: 'mac.json', sha256: 'b'.repeat(64), scroll_speed: 0.3125}}), 'a reference equals its converted scrolling');
+  assert.ok(!ctx.Scroll.same(ctx.scrollFeel, {profile: 'imported',
+    imported: {file: 'mac.json', sha256: 'b'.repeat(64), scroll_speed: 1}}), 'another scrolling speed is a change');
+  ctx.devices[0].settings.accel_profile = 'flat';
+  ctx.devices[0].imported_scroll_inactive = true;
+  ctx.loadSelection();
+  assert.equal(ctx.scrollInactive, true, 'System or Flat pointer feel leaves macOS scrolling inactive');
+  ctx.editingScrollFeel = true;
+  assert.equal(ctx.keyboardNavigationBlocked(), true, 'the scroll feel editor owns its keyboard input');
+}
+
+{
+  const Scroll = require('./Scroll.js');
+  const row = {file: 'mac.json', sha256: 'c'.repeat(64), name: 'Mac',
+    scroll: {speed: 0.3125, measured: true, speeds: [0, 0.125, 0.5, 1, 3]}};
+  assert.deepEqual(Scroll.speeds(row), [0, 0.125, 0.3125, 0.5, 1, 3], "the Mac's own speed joins Apple's stops");
+  assert.deepEqual(Scroll.speeds({...row, scroll: {...row.scroll, speed: 1}}), [0, 0.125, 0.5, 1, 3]);
+  assert.ok(Scroll.usable(row));
+  for (const bad of [{...row, error: 'x'}, {...row, scroll: undefined}, {...row, scroll: {...row.scroll, measured: false}},
+                     {...row, scroll: {...row.scroll, error: 'too fast'}}])
+    assert.ok(!Scroll.usable(bad));
+  assert.deepEqual(Scroll.reference(row), {file: 'mac.json', sha256: 'c'.repeat(64), name: 'Mac', scroll_speed: 0.3125});
+}
+
 // Keep the inherited device parser usable for Intel Mac installations.
 {
   const model = require('./Model.js');
@@ -432,4 +505,4 @@ function context() {
     assert.equal(model.parseTouchpadDevice(JSON.stringify({mice: [{name}]})), name);
   assert.equal(model.parseTouchpadDevice(JSON.stringify({mice: [{name: 'bcm5974-mouse'}]})), '');
 }
-console.log('Passed: device selection, fine scroll steps, stale-read rejection, debounce ordering, timeout recovery, and IPC configuration.');
+console.log('Passed: device selection, fine scroll steps, scroll feel, stale-read rejection, debounce ordering, timeout recovery, and IPC configuration.');
