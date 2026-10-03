@@ -141,6 +141,9 @@ final class ProbeWindow: NSWindow {
 // The page that scrolls: stripes every 50 points so movement is visible, and NSTouch input.
 final class Paper: NSView {
     override var isFlipped: Bool { true }
+    // Responsive scrolling takes a gesture's changed and momentum events off -sendEvent:, where
+    // the local monitor never sees them; without it every event passes the monitor.
+    override class var isCompatibleWithResponsiveScrolling: Bool { false }
     override func touchesBegan(with event: NSEvent) { recordTouches(event) }
     override func touchesMoved(with event: NSEvent) { recordTouches(event) }
     override func touchesEnded(with event: NSEvent) { recordTouches(event) }

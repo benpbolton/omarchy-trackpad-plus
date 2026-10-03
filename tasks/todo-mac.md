@@ -163,6 +163,7 @@ two fingers for a few seconds, including one flick, then press Esc."* Then run:
 /tmp/scroll-probe /tmp/smoke.csv --seconds 10
 grep '^# hid' /tmp/smoke.csv                                   # want: # hid,1,children,1,attachment,1
 awk -F, '$1=="S" && $25!="" && $27!=""' /tmp/smoke.csv | head -3   # raw and accelerated vertical values
+grep -c '^S,' /tmp/smoke.csv                                   # scroll events: want hundreds, like V
 grep -c '^N,' /tmp/smoke.csv                                   # touch frames: want hundreds
 grep -c '^V,' /tmp/smoke.csv                                   # scroll-view offsets: want > 0
 ```
@@ -175,6 +176,7 @@ In S rows, field 25 is `hid_raw_y` and field 27 is `hid_accel_y` (field 1 is the
 | `children,0`, or raw values present but accelerated empty | macOS drops the accelerated child | Fine: the check falls back to AppKit deltas (shape only). Note it. |
 | No `N` rows | no touch input | Troubleshooting D |
 | No `S` rows | the window isn't receiving scroll events | Troubleshooting D |
+| A handful of `S` rows but hundreds of `V` rows | AppKit's responsive scrolling is consuming the gesture | Check that `Paper` still opts out of it |
 
 ## 5. 👤 The recording (one to two minutes)
 
