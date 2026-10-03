@@ -186,18 +186,22 @@ give the momentum fit and the Linux replay more to work with.
 
 Tell the person, word for word if you like:
 
-> A dark full-screen page will open with instructions and coverage bars. For a minute or two,
-> scroll it with two fingers and no clicks, mixing all six kinds of movement, up and down:
+> A dark full-screen page will open with instructions and coverage bars. Click once in the middle
+> of it, then watch "touch frames" climb as you scroll. For a minute or two, scroll it with two
+> fingers and no more clicks, mixing all six kinds of movement, up and down:
 > 1. very slow, careful scrolling: stop, then lift
 > 2. ordinary scrolling
-> 3. flicks, soft and hard, lifted while moving; let most of them glide all the way to a stop
->    without touching
+> 3. flicks, soft and hard, lifted while moving; let most of them glide all the way to a stop.
+>    Wait until the page has stopped before your next stroke, because touching ends the glide.
 > 4. a few flicks stopped by touching the trackpad mid-glide
 > 5. bursts of three or four quick flicks in the same direction
 > 6. a few sideways scrolls and flicks
 >
-> Try to fill every bar. It stops by itself after two minutes. Once you've made at least a dozen
-> flicks that glide to a stop, Esc ends it early.
+> Try to fill every bar. "Full glides" counts only glides that run out on their own. It stops by
+> itself after two minutes, and Esc ends it early once "full glides" is full.
+
+On 2026-10-03, the first three recordings held 110 flicks and no glide that ran out: each one was
+ended by the next stroke. `tasks/results-mac-scrolling.md` has the details.
 
 ```sh
 /tmp/scroll-probe /tmp/scroll.csv

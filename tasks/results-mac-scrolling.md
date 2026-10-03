@@ -114,11 +114,13 @@ FAIL: accelerator ≤1 % ✗; finger mapping within ±10 % ✓; ≥8 flicks ✓;
 
 - PASS/FAIL: FAIL on every recording; nothing written.
   - The profile was **restored** with `git checkout` to the version-1 pointer profile.
-  - Keeping the version-2 export (`driver: null`) broke two tests in `test_export_profile.py`:
-    `test_add_scroll_keeps_the_checked_pointer_half` and
-    `test_pointer_only_profiles_cannot_be_scroll_checked`. Both assume the checked-in profile has no
-    scroll section, so a passing `--write` would break them too.
-  - The version-2 export is on the data branch as `profile-after-check.json`.
+  - Keeping the version-2 export (`driver: null`) broke two tests in `test_export_profile.py`,
+    which used the checked-in profile as their pointer-only fixture. `5efb768` fixes them: they now
+    drop the scroll section first, and pass with a version-1 profile, the version-2 export, and a
+    version-2 profile with a measured driver.
+  - The profile still stays at version 1. Without a driver, the scroll section gives Linux nothing:
+    there's no `scroll_points`, and `--preview` refuses it. The version-2 export is on the data
+    branch as `profile-after-check.json`.
 - `--preview` scrolling section: `Scrolling: run the scroll check (scroll-probe.swift) to measure the driver first.`
   It needs a measured driver.
 - Second speed: skipped. It only tests the accelerator line, which fails at the current speed.
@@ -199,7 +201,9 @@ FAIL: accelerator ≤1 % ✗; finger mapping within ±10 % ✓; ≥8 flicks ✓;
     should keep classifying strokes from the recording itself.
 
 ## Data
-- Branch `data/macos-scrolling` commit: `c8c6e494dfcdf964fa42ad01b10219d809ba37d9` (fork `benpbolton/omarchy-trackpad-plus`)
+- Branch `data/macos-scrolling` commit: `742ee05` (fork `benpbolton/omarchy-trackpad-plus`). The
+  recordings landed in `c8c6e49`; `742ee05` makes the analysis scripts read the profile beside
+  them.
 - Files: `2026-10-03/`: five gzipped recordings (`smoke-responsive`, `smoke`, `scroll`, `scroll-2`, `scroll-3`), `check-*.txt`, `ioreg-scroll.txt`, `hidutil-scroll.txt`, `profile-after-check.json`, `analysis/` (the hypothesis scripts) and a README.
 
 ## Open questions
@@ -208,6 +212,23 @@ FAIL: accelerator ≤1 % ✗; finger mapping within ±10 % ✓; ≥8 flicks ✓;
 - Should the probe record each child's type and the HID sender ID (CSV version 2) to find out?
 - Should `momentum_rate_hz` in the profile hold the measured 120 Hz, since the attachment never
   reaches apps?
-- The export tests use the checked-in profile as their pointer-only fixture. They should build that
-  fixture by dropping `scroll`, so step 7a's "keep the version-2 export" and a future `--write` can
-  both land.
+- The 2026-09-30 handoff commit `9a06ed6` (`tasks/plan.md`, `todo.md`, `lessons.md`) exists only
+  on the Mac's local `feat/macos-pointer-profiles`; it was never pushed. If Omarchy lacks those
+  notes, Ben can push them from the Mac. This session left that branch alone, as the runbook says.
+
+## Lessons (for `tasks/lessons.md` on the Omarchy side)
+- A smoke test must check the counts the analysis depends on, not just that rows exist. The
+  runbook's checks passed a probe that missed 99 % of scroll events (4 S rows against 760 V rows).
+- Coverage feedback must count what the analysis can use. The bars counted glides that *began*,
+  and an empty "stopped" bar led the person to stop every glide. Across 110 glides in three
+  recordings, none ran out, and the momentum fit had nothing to fit. People fill the bars they see.
+- On macOS, a local event monitor only sees events that pass through `-sendEvent:`. AppKit's
+  responsive scrolling handles a gesture's changed and momentum events elsewhere. A probe built on
+  NSScrollView has to opt out.
+- When a value is missing in the app, read the source before concluding the system lacks it.
+  Apple's filter reads `ScrollMomentumDispatchRate` exactly as the probe does, so its absence
+  means it was stripped downstream. Measure the quantity instead, here from the event cadence.
+- Runbooks must not assume remote names: `origin` meant the fork on Omarchy and upstream on the Mac.
+  Find the fork by its URL.
+- Tests must not use a shipped data file as a fixture when the workflow is designed to change that
+  file.
