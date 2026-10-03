@@ -987,6 +987,44 @@ class TrackpadTests(unittest.TestCase):
         self.assertEqual(row['scroll'], {'speed': 0.3125, 'measured': True,
                                          'speeds': [0, 0.125, 0.5, 0.6875, 0.875, 1, 1.5, 2, 2.5, 3]})
 
+    def test_chromium_scaling_follows_macos_scrolling(self):
+        state = self.scroll_state()
+        lua = m.lua_for(state['devices'])
+        rule = next(line for line in lua.splitlines() if 'hl.window_rule' in line)
+        self.assertIn(f'name = "{m.CHROMIUM_RULE}", enabled = true', rule)
+        self.assertIn('xwayland = false', rule)
+        self.assertIn('scroll_touchpad = 0.083333', rule)
+        self.assertIn('brave-browser', rule)
+        self.assertEqual(lua.splitlines()[-1], 'end')
+        with patch.object(m, 'hypr', side_effect=self.compositor) as run, patch.object(m, 'save'), NATIVE():
+            linear = m.change(state, 'apple', 'scroll_feel', {'profile': 'linear'})
+        # Linear removes the rule from the file; the live update turns the named rule off.
+        self.assertNotIn('hl.window_rule', m.lua_for(linear['devices']))
+        live = [call.args[1] for call in run.call_args_list if call.args[0] == 'eval'][-1]
+        self.assertIn(f'name = "{m.CHROMIUM_RULE}", enabled = false', live)
+        # Groups without macOS scrolling never add the rule to the file.
+        self.assertNotIn('hl.window_rule', m.lua_for(m.migrate(self.state)['devices']))
+
+    def test_chromium_scaling_stays_on_while_any_group_scrolls_like_macos(self):
+        state = self.scroll_state()
+        with patch.object(m, 'hypr', side_effect=self.compositor) as run, patch.object(m, 'save'), NATIVE():
+            m.change(state, 'dell', 'tap_to_click', False)
+        live = [call.args[1] for call in run.call_args_list if call.args[0] == 'eval'][-1]
+        self.assertIn(f'name = "{m.CHROMIUM_RULE}", enabled = true', live, 'another trackpad still scrolls like macOS')
+        with patch.object(m, 'hypr', side_effect=self.compositor), patch.object(m, 'save'), NATIVE():
+            flat = m.change(state, 'apple', 'accel_profile', 'flat')
+        self.assertNotIn('hl.window_rule', m.lua_for(flat['devices']), 'inactive macOS scrolling needs no scaling')
+
+    def test_scrolling_speed_stops_include_the_macs_own_setting(self):
+        scrolling = self.scroll_state(scroll_speed=1.5)['devices']['apple']['settings']['imported_scroll']
+        self.assertEqual(scrolling['mac_speed'], 0.3125)
+        self.assertEqual(scrolling['speeds'], [0, 0.125, 0.3125, 0.5, 0.6875, 0.875, 1, 1.5, 2, 2.5, 3])
+        for bad in ([], [1, 0], [0, 0], [11]):
+            broken = copy.deepcopy(scrolling)
+            broken['speeds'] = bad
+            with self.assertRaises(ValueError):
+                m.validate_imported_scroll(broken)
+
     def test_scroll_drift_is_reported_like_pointer_drift(self):
         state = self.scroll_state()
         moved = m.snapshot(state, {}, dict(PANEL[0], scale=1.6))['devices'][0]

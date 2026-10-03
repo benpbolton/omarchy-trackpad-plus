@@ -45,8 +45,15 @@ KNOWN_RESOLUTIONS = {
 METADATA = {'curve', 'curve_preset', 'scroll_scale', 'imported_curve', 'units_per_mm', 'scroll_preset', 'imported_scroll'}
 IMPORTED_KEYS = {'name', 'file', 'sha256', 'tracking_speed', 'mm_per_point', 'px_per_point', 'devices'}
 # macOS scrolling keeps the model behind its libinput points, for the compositor plugin.
-IMPORTED_SCROLL_KEYS = {'name', 'file', 'sha256', 'scroll_speed', 'mm_per_point', 'px_per_point', 'devices', 'model'}
+IMPORTED_SCROLL_KEYS = {'name', 'file', 'sha256', 'scroll_speed', 'mac_speed', 'speeds', 'mm_per_point', 'px_per_point',
+                        'devices', 'model'}
 SCROLL_MODEL_KEYS = {'curve', 'resolution', 'report_rate_hz', 'driver'}
+# Chromium multiplies Wayland touchpad scroll values by 12 (value / 10 × 120) unless its
+# WaylandUnscaledTouchpadScrolling feature is enabled, so browsers built on it and their web apps
+# get 1/12 while macOS scrolling, whose curve already produces final pixels, is active.
+CHROMIUM_RULE = 'trackpad-plus-chromium-scroll'
+CHROMIUM_CLASSES = 'chromium|brave-browser|google-chrome.*|chrome-.*|brave-.*|vivaldi.*|microsoft-edge.*|thorium.*|helium.*'
+CHROMIUM_SCALE = 1 / 12
 PROFILE_FILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._ ,+-]{0,123}\.json')
 MAX_PROFILES = 32
 
@@ -208,6 +215,14 @@ def validate_imported_scroll(value):
     """macOS scrolling converted for this group's interfaces, and the model it came from."""
     validate_converted(value, IMPORTED_SCROLL_KEYS, 'scroll')
     pointer_profiles.number(value['scroll_speed'], 0, 10)
+    pointer_profiles.number(value['mac_speed'], 0, 10)
+    speeds = value['speeds']
+    if not isinstance(speeds, list) or not 1 <= len(speeds) <= 17:
+        raise ValueError('Invalid imported scrolling speeds')
+    for speed in speeds:
+        pointer_profiles.number(speed, 0, 10)
+    if speeds != sorted(set(speeds)):
+        raise ValueError('Invalid imported scrolling speeds')
     model = value['model']
     if not isinstance(model, dict) or set(model) != SCROLL_MODEL_KEYS \
             or not isinstance(model['curve'], dict) or set(model['curve']) != set(pointer_profiles.CURVE_KEYS):
@@ -310,7 +325,20 @@ def group_devices(mice):
     return groups
 
 
-def lua_for(groups):
+def chromium_rule(enabled):
+    return (f'hl.window_rule({{ name = "{CHROMIUM_RULE}", enabled = {"true" if enabled else "false"}, '
+            f'match = {{ class = {json.dumps(CHROMIUM_CLASSES)}, xwayland = false }}, '
+            f'scroll_touchpad = {CHROMIUM_SCALE:.6f} }})')
+
+
+def chromium_active(devices):
+    return any(imported_scroll_active(group['settings']) for group in devices.values()
+               if group.get('configured', True))
+
+
+def lua_for(groups, chromium=None):
+    """Rules for these groups. The rule file names the Chromium scaling only while it is active;
+    a live update passes `chromium` from the whole state, so the named rule can also turn off."""
     # hyprctl interprets an argument starting with '--' as a CLI flag.
     lines = ['do -- Managed by davefano.trackpad-plus. Change settings in Trackpad Plus.']
     for group in groups.values():
@@ -349,6 +377,8 @@ def lua_for(groups):
             else:
                 tail = []
             lines.append('hl.device({ name = ' + json.dumps(name) + ', ' + ', '.join(own + fields + tail) + ' })')
+    if chromium is not None or chromium_active(groups):
+        lines.append(chromium_rule(chromium_active(groups) if chromium is None else chromium))
     return '\n'.join(lines + ['end']) + '\n'
 
 
@@ -550,6 +580,8 @@ def import_scroll(group, reference, monitor=None):
     if not scroll or not scroll['driver']:
         raise ValueError(f"{reference['file']} has no measured scrolling; run the scroll check on its Mac "
                          '(see tools/macos/README.md)')
+    mac_speed = scroll['speed']
+    stops = sorted({curve['index'] / pointer_profiles.FIXED for curve in scroll['curves']} | {mac_speed})
     if 'scroll_speed' in reference:
         # The macOS Scrolling speed slider: Apple interpolates its own curves for any value.
         scroll = dict(scroll, speed=reference['scroll_speed'])
@@ -570,7 +602,8 @@ def import_scroll(group, reference, monitor=None):
                          + '; set its units_per_mm (see tools/macos/README.md)')
     return validate_imported_scroll({
         'name': profile['name'], 'file': reference['file'], 'sha256': reference['sha256'],
-        'scroll_speed': scroll['speed'], 'mm_per_point': round(millimetres, 6), 'px_per_point': round(scale, 6),
+        'scroll_speed': scroll['speed'], 'mac_speed': mac_speed, 'speeds': stops,
+        'mm_per_point': round(millimetres, 6), 'px_per_point': round(scale, 6),
         'devices': devices,
         'model': {'curve': pointer_profiles.curve_parameters(scroll['curves'], scroll['speed']),
                   'resolution': scroll['resolution'], 'report_rate_hz': scroll['report_rate_hz'],
@@ -781,7 +814,7 @@ def restore_previous(state, key, persist=True):
             failures.append(str(exc))
     try:
         if state['devices'][key].get('configured', True):
-            hypr('eval', lua_for({key: state['devices'][key]}))
+            hypr('eval', lua_for({key: state['devices'][key]}, chromium_active(state['devices'])))
         elif not failures:
             # No previous plugin rule exists. Only a config reload can remove
             # the first runtime override and restore the user's original rules.
@@ -823,7 +856,7 @@ def reconcile_generated(state, previous=None):
         groups = {key: group for key, group in groups.items()
                   if key not in previous['devices']
                   or lua_for({key: group}) != lua_for({key: previous['devices'][key]})}
-    hypr('eval', lua_for(groups))
+    hypr('eval', lua_for(groups, chromium_active(state['devices'])))
     atomic_write(GENERATED, expected)
 
 
@@ -1011,7 +1044,7 @@ def change(state, key, option, value):
     saving = False
     try:
         # Only the selected trackpad receives a live update.
-        hypr('eval', lua_for({key: updated['devices'][key]}))
+        hypr('eval', lua_for({key: updated['devices'][key]}, chromium_active(updated['devices'])))
         saving = True
         save(updated)
         clear_pending()
