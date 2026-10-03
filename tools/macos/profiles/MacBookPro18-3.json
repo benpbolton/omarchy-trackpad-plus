@@ -1,6 +1,6 @@
 {
   "format": "trackpad-plus/pointer-profile",
-  "version": 1,
+  "version": 2,
   "kind": "apple-parametric",
   "name": "MacBook Pro (M1 Pro)",
   "tracking_speed": 0.875,
@@ -115,6 +115,122 @@
     "device": "Apple Internal Keyboard / Trackpad",
     "transport": "SPI",
     "exported": "2026-10-01T00:09:49Z",
-    "exporter": 1
+    "exporter": 2,
+    "scroll_os": "macOS 15.7.9 (24G830)",
+    "scroll_exported": "2026-10-01T00:09:49Z"
+  },
+  "scroll": {
+    "speed": 0.3125,
+    "resolution": 400.0,
+    "report_rate_hz": 67.0,
+    "momentum_rate_hz": 120.0,
+    "natural": false,
+    "curves": [
+      {
+        "index": 0,
+        "linear": 65536,
+        "parabolic": 0,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 393216,
+        "tangent_root": 786432
+      },
+      {
+        "index": 8192,
+        "linear": 62259,
+        "parabolic": 39322,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 406323,
+        "tangent_root": 786432
+      },
+      {
+        "index": 32768,
+        "linear": 58982,
+        "parabolic": 58982,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 419430,
+        "tangent_root": 786432
+      },
+      {
+        "index": 45056,
+        "linear": 55706,
+        "parabolic": 78643,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 432538,
+        "tangent_root": 786432
+      },
+      {
+        "index": 57344,
+        "linear": 52429,
+        "parabolic": 91750,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 445645,
+        "tangent_root": 786432
+      },
+      {
+        "index": 65536,
+        "linear": 49152,
+        "parabolic": 104858,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 458752,
+        "tangent_root": 786432
+      },
+      {
+        "index": 98304,
+        "linear": 45875,
+        "parabolic": 117965,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 471859,
+        "tangent_root": 786432
+      },
+      {
+        "index": 131072,
+        "linear": 42598,
+        "parabolic": 131072,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 484966,
+        "tangent_root": 786432
+      },
+      {
+        "index": 163840,
+        "linear": 39322,
+        "parabolic": 144179,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 498074,
+        "tangent_root": 786432
+      },
+      {
+        "index": 196608,
+        "linear": 36045,
+        "parabolic": 157286,
+        "cubic": 0,
+        "quartic": 0,
+        "tangent_linear": 511181,
+        "tangent_root": 786432
+      }
+    ],
+    "driver": {
+      "units_per_mm": 15.1,
+      "frame_rate_hz": 120.1,
+      "split_min": 2.0,
+      "points_per_unit": 10.0,
+      "release_ms": 42,
+      "release_gain": 0.8989,
+      "release_min": 399.93,
+      "momentum_table_hz": 0,
+      "verified": "2026-10-03 scroll check: momentum accelerator 0.000 %, finger model 5.4 %, glides 0.7 %",
+      "decay_fast": 0.975,
+      "decay_slow": 0.91,
+      "decay_velocity": 250.0,
+      "stop_velocity": 30.0
+    }
   }
 }

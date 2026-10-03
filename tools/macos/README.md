@@ -80,7 +80,8 @@ which rebuilds the system's momentum so Safari can draw it at the display's refr
 
 1. The closed multitouch driver turns two-finger motion into raw scroll deltas with phases
    and, after the fingers lift, sends momentum deltas — at the display's rate on ProMotion,
-   with a `ScrollMomentumDispatchRate` attachment — until they decay or a finger lands.
+   with a `ScrollMomentumDispatchRate` attachment that never reaches apps — until they decay
+   or a finger lands.
 2. [`IOHIDPointerScrollFilter::accelerateEvent`](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDPointerScrollFilter.cpp#L567-L622)
    accelerates every non-zero delta on each axis separately, momentum included; a momentum
    delta is scaled to 60 Hz around the call. Zero deltas never reach the history.
@@ -97,13 +98,34 @@ which rebuilds the system's momentum so Safari can draw it at the display's refr
    250 raw units/s; it ends below 30 units/s on both axes. WebKit builds this at 60 Hz and
    samples it at the display's rate; generating 120 Hz frames directly would glide about 5 %
    less, so the scroll check measures which one macOS does.
-5. WindowServer and AppKit turn the accelerated value into points; natural scrolling only
-   flips the sign. Rubber-banding at the end of a page belongs to each app.
+5. WindowServer rounds `10 ×` the accelerated value **up** to whole points per event, which is
+   what apps and `NSScrollView` scroll by, so a slow stroke moves at least a point per event.
+   AppKit adds a little more to repeated quick swipes (scroll count 3 and up). Natural
+   scrolling only flips the sign. Rubber-banding at the end of a page belongs to each app.
 
-The scroll check measures what the closed driver keeps to itself: raw units per mm of finger
-travel, its event rate, how the last moments of contact set the first momentum delta, the
-slowest flick that glides, and the decay. It first replays every recorded raw delta through
-the port of step 3 and requires Apple's own accelerated value back, event by event.
+### What the MacBook Pro 14" (M1 Pro) recordings showed
+
+The two-minute recordings of 2026-10-03 are on the fork's `data/macos-scrolling` branch;
+`tasks/results-mac-scrolling.md` has the session's notes.
+
+- **Momentum is exact.** Once each 120 Hz momentum delta is scaled to 60 Hz, the port of step 3
+  reproduces every momentum value (median error 0.000 % over 2422), and so does each stroke's
+  first event. Frames are generated directly at 120 Hz, not sampled from a 60 Hz table (0.7 %
+  against 2.1 % in glide distance).
+- **Contact cannot be replayed from what apps see.** Contact events arrive as two interleaved
+  ~120 Hz streams with a drifting phase. Apple's filter accelerates fractional inputs, while apps
+  receive a per-event rounding of them; after the first event of a stroke, Apple's velocity is
+  about half of what the delivered events imply, and no history rebuilt from them matches.
+- **So contact is modelled from finger motion,** which is also what libinput provides:
+  15.1 raw units per mm, each 120 Hz finger frame split into two equal events once it moves 2
+  units, through the same accelerator and the rounding. Each stroke's accelerated total matches
+  within 5.4 % (median of 44), and the points apps receive within 7 % from 10 to 400 mm/s.
+  The release is the finger's mean velocity over its last 42 ms × 0.90.
+- CGEvent fields 175–178 (`…AcceleratedDeltaAxis2/1`, `…RawDeltaAxis2/1`) carry the same raw and
+  accelerated values as the private HID event.
+
+The scroll check verifies the accelerator on momentum and stroke starts, the rounding, the finger
+model, the release and the decay, and writes the fitted constants to the profile.
 
 ## How Linux receives it
 
