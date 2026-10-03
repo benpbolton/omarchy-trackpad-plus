@@ -3,13 +3,16 @@
 
 macOS scrolls a trackpad in three stages; tools/macos/README.md links the source of each.
 
-1. The closed multitouch driver turns two-finger motion into raw scroll deltas and, after
-   the fingers lift, generates momentum deltas. A profile's scroll `driver` holds the
-   constants the scroll check measures for it.
+1. The closed multitouch driver turns two-finger motion into raw scroll events and, after
+   the fingers lift, generates momentum events. Its contact events are not what apps receive
+   (they see per-event roundings of two interleaved ~120 Hz streams), so contact is modelled
+   from finger motion: `units_per_mm` raw units per mm, two events per finger frame once a
+   frame moves `split_min` units. A profile's scroll `driver` holds these measured constants.
 2. IOHIDScrollAccelerator (IOHIDFamily) accelerates every non-zero delta, momentum included,
    from the average of up to nine recent events on that axis. ScrollAccelerator ports it
-   line by line.
-3. WindowServer and AppKit turn the accelerated value into points (`points_per_unit`).
+   line by line; on momentum it reproduces every recorded value exactly.
+3. WindowServer rounds each event's `points_per_unit` × accelerated value up to whole points,
+   which is what apps scroll by; slow strokes therefore move at least a point per event.
 
 Momentum follows the system decay that WebKit's MomentumEventDispatcher reproduces. libinput
 can neither keep history nor generate momentum, so convert() samples the steady state.
@@ -158,23 +161,49 @@ def momentum(velocity, rate, decay=DECAY, table_rate=0):
     return frames
 
 
-def release_velocity(contact, driver):
-    """Raw units/s over the last `release_ms` of contact deltas [(seconds, dx, dy)]."""
-    if not contact:
+def contact_events(frames, driver):
+    """Raw driver events [(seconds, rx, ry)] for finger frames [(seconds, dx_mm, dy_mm)].
+
+    Each frame's motion becomes two equal events half a frame apart, the second at the frame,
+    or one event when the frame moves less than `split_min` raw units on both axes.
+    """
+    events, period, units = [], 1 / driver['frame_rate_hz'], driver['units_per_mm']
+    for seconds, dx, dy in frames:
+        rx, ry = dx * units, dy * units
+        if not (rx or ry):
+            continue
+        count = 2 if max(abs(rx), abs(ry)) >= driver['split_min'] else 1
+        for index in range(count):
+            events.append((seconds - period * (count - 1 - index) / count, rx / count, ry / count))
+    return events
+
+
+def points(accelerated, driver):
+    """Whole points an app scrolls for one accelerated value: rounded up, away from zero."""
+    if not accelerated:
+        return 0.0
+    return math.copysign(math.ceil(abs(accelerated) * driver['points_per_unit'] - 1e-9), accelerated)
+
+
+def release_velocity(frames, driver):
+    """Raw units/s of the finger's mean motion over the last `release_ms` of contact."""
+    if not frames:
         return 0.0, 0.0
     window = driver['release_ms'] / 1000
-    end = contact[-1][0]
-    recent = [(dx, dy) for seconds, dx, dy in contact if seconds > end - window]
-    gain = driver['release_gain'] / window
+    end = frames[-1][0]
+    # A frame carries the motion since the one before, so a frame on the window's edge is out.
+    recent = [(dx, dy) for seconds, dx, dy in frames if seconds > end - window + 1e-6]
+    gain = driver['release_gain'] * driver['units_per_mm'] / window
     return sum(d[0] for d in recent) * gain, sum(d[1] for d in recent) * gain
 
 
-def simulate(profile, contact, lift=None):
-    """Accelerate a stroke as macOS would: contact deltas, then momentum if it starts.
+def simulate(profile, frames, momentum_rate=None):
+    """Scroll one stroke as macOS would, from finger frames to the points apps receive.
 
-    `contact` is [(seconds, dx, dy)] of raw driver deltas; `lift` is when the fingers left
-    (default: one event period after the last delta). Returns [(seconds, ax, ay, momentum)]
-    in accelerated scroll units; multiply by `points_per_unit` for points.
+    `frames` is [(seconds, dx_mm, dy_mm)]: the fingers' motion in each frame while they touch;
+    they lift one frame after the last. Contact events and then, for a fast enough release,
+    momentum at `momentum_rate` Hz (the profile's by default) run through one accelerator per
+    axis. Returns [(seconds, ax, ay, px, py, momentum)]: accelerated units and whole points.
     """
     scroll = profile['scroll']
     driver = scroll['driver']
@@ -184,38 +213,42 @@ def simulate(profile, contact, lift=None):
     def push(seconds, dx, dy, rate, is_momentum):
         ax = x_axis.accelerate(dx, seconds, rate) if dx else 0.0
         ay = y_axis.accelerate(dy, seconds, rate) if dy else 0.0
-        out.append((seconds, ax, ay, is_momentum))
+        out.append((seconds, ax, ay, points(ax, driver), points(ay, driver), is_momentum))
 
-    for seconds, dx, dy in contact:
+    for seconds, dx, dy in contact_events(frames, driver):
         push(seconds, dx, dy, None, False)
-    if not contact:
+    vx, vy = release_velocity(frames, driver)
+    if not frames or math.hypot(vx, vy) < driver['release_min']:
         return out
-    vx, vy = release_velocity(contact, driver)
-    if math.hypot(vx, vy) < driver['release_min']:
-        return out
-    rate = scroll['momentum_rate_hz']
-    start = lift if lift is not None else contact[-1][0] + 1 / driver['event_rate_hz']
-    frames = momentum((vx, vy), rate, constants(driver), driver['momentum_table_hz'])
-    for index, (dx, dy) in enumerate(frames):
+    rate = momentum_rate or scroll['momentum_rate_hz']
+    lift = frames[-1][0] + 1 / driver['frame_rate_hz']
+    for index, (dx, dy) in enumerate(momentum((vx, vy), rate, constants(driver), driver['momentum_table_hz'])):
         if dx or dy:
-            push(start + index / rate, dx, dy, rate, True)
+            push(lift + index / rate, dx, dy, rate, True)
     return out
 
 
-def steady_points(profile, finger_mm_s):
-    """Points per second for a steady two-finger stroke, with the accelerator's history full."""
+def steady_points(profile, finger_mm_s, rounded=True):
+    """Points per second for a steady two-finger stroke, with the accelerator's history full.
+
+    With `rounded`, each event's points are the expectation of rounding up a value that
+    jitters by ±½ point: at least one point, else half a point more than its value.
+    """
     scroll = profile['scroll']
     driver = scroll['driver']
     f = scroll_function(profile)
     rate = scroll['report_rate_hz']
-    per_event = driver['units_per_mm'] * finger_mm_s / driver['event_rate_hz']
-    if per_event <= 0:
+    per_frame = driver['units_per_mm'] * finger_mm_s / driver['frame_rate_hz']
+    if per_frame <= 0:
         return 0.0
+    count = 2 if per_frame >= driver['split_min'] else 1
+    per_event, events = per_frame / count, driver['frame_rate_hz'] * count
     rate_multiplier = rate / pp.FRAME_RATE
-    average_ms = min(max(1000 / driver['event_rate_hz'] * rate_multiplier, 1), EVENT_MS)
+    average_ms = min(max(1000 / events * rate_multiplier, 1), EVENT_MS)
     velocity = max(velocity_scale(average_ms) * per_event * rate_multiplier, pp.MINIMUM_VELOCITY)
     accelerated = per_event * f(velocity * rate / scroll['resolution']) * pp.CURSOR_SCALE / velocity
-    return accelerated * PIXEL_TO_WHEEL * driver['points_per_unit'] * driver['event_rate_hz']
+    value = accelerated * PIXEL_TO_WHEEL * driver['points_per_unit']
+    return (max(1.0, value + 0.5) if rounded else value) * events
 
 
 def convert(profile, units_per_mm, scale):
@@ -239,12 +272,13 @@ def convert(profile, units_per_mm, scale):
         return steady_points(profile, speed * mm_per_unit) * scale / 1000
 
     limit = 1200 / mm_per_unit  # sample no further than a 1.2 m/s flick
-    if parameters['tangent_linear']:
+    if parameters['tangent_linear']:  # where Apple's curve turns linear, at two events a frame
         rate_multiplier = scroll['report_rate_hz'] / pp.FRAME_RATE
-        average_ms = min(max(1000 / driver['event_rate_hz'] * rate_multiplier, 1), EVENT_MS)
+        events = 2 * driver['frame_rate_hz']
+        average_ms = min(max(1000 / events * rate_multiplier, 1), EVENT_MS)
         velocity = parameters['tangent_linear'] * scroll['resolution'] / scroll['report_rate_hz']
         per_event = velocity / (velocity_scale(average_ms) * rate_multiplier)
-        limit = min(limit, per_event * driver['event_rate_hz'] / driver['units_per_mm'] / mm_per_unit)
+        limit = min(limit, per_event * events / driver['units_per_mm'] / mm_per_unit)
     else:
         limit = min(limit, 800 / mm_per_unit)
     step = math.ceil(limit / (pp.NPOINTS - 2) * 10000) / 10000

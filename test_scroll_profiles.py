@@ -18,8 +18,9 @@ pp = s.pp
 STAND_IN_CURVES = [(0, 65536, 0, 0, 393216, 786432), (8192, 62259, 39322, 0, 406323, 786432),
                    (32768, 58982, 58982, 0, 419430, 786432), (65536, 49152, 104858, 0, 458752, 786432),
                    (196608, 36045, 157286, 0, 511181, 786432)]
-DRIVER = {'units_per_mm': 15.75, 'event_rate_hz': 123.4, 'points_per_unit': 10.0, 'release_ms': 50,
-          'release_gain': 1.0, 'release_min': 60.0, 'momentum_table_hz': 0, 'verified': '', **s.DECAY}
+# The constants measured from the 2026-10-03 recordings of MacBookPro18,3 (see tasks/results-mac-scrolling.md).
+DRIVER = {'units_per_mm': 14.5, 'frame_rate_hz': 120.0, 'split_min': 1.0, 'points_per_unit': 10.0, 'release_ms': 50,
+          'release_gain': 1.02, 'release_min': 60.0, 'momentum_table_hz': 0, 'verified': '', **s.DECAY}
 
 
 def scroll(**changes):
@@ -206,27 +207,63 @@ class MomentumTests(unittest.TestCase):
             self.assertAlmostEqual(len(high) / 120 / (len(low) / 60), 1, delta=0.12)
 
 
+def stroke(speed, seconds=0.5, rate=120.0, start=1.0):
+    """Finger frames for a steady vertical stroke at `speed` mm/s."""
+    return [(start + k / rate, 0.0, speed / rate) for k in range(int(seconds * rate))]
+
+
+class ContactTests(unittest.TestCase):
+    def test_frames_split_into_two_events_once_they_move_enough(self):
+        driver = dict(DRIVER, units_per_mm=10.0, split_min=1.0, frame_rate_hz=100.0)
+        events = s.contact_events([(1.0, 0.0, 0.05), (1.01, 0.0, 0.2), (1.02, 0.0, 0.0), (1.03, -0.1, 0.0)], driver)
+        self.assertEqual(len(events), 1 + 2 + 2)
+        self.assertEqual(events[0], (1.0, 0.0, 0.5))                       # 0.5 units: one event
+        self.assertAlmostEqual(events[1][0], 1.005)                         # half a frame earlier
+        self.assertEqual(events[1][1:], (0.0, 1.0))
+        self.assertEqual(events[2], (1.01, 0.0, 1.0))
+        self.assertEqual([e[1] for e in events[3:]], [-0.5, -0.5])          # either axis can split
+
+    def test_points_round_up_away_from_zero(self):
+        self.assertEqual(s.points(0.0022, DRIVER), 1)
+        self.assertEqual(s.points(-0.10014, DRIVER), -2)
+        self.assertEqual(s.points(1.29726, DRIVER), 13)
+        self.assertEqual(s.points(0.2, DRIVER), 2)        # exactly 2.0 stays 2
+        self.assertEqual(s.points(0.0, DRIVER), 0)
+
+    def test_release_is_the_mean_finger_velocity_of_the_last_frames(self):
+        frames = stroke(40, seconds=0.2) + stroke(100, seconds=0.1, start=1.2)
+        vx, vy = s.release_velocity(frames, DRIVER)
+        self.assertEqual(vx, 0)
+        # The last 50 ms are all at 100 mm/s: six frames of 100/120 mm, over 50 ms.
+        self.assertAlmostEqual(vy, 6 * 100 / 120 * 14.5 * 1.02 / 0.05)
+
+
 class SimulationTests(unittest.TestCase):
     def test_a_steady_stroke_reaches_the_static_curve(self):
         value = profile()
-        driver = value['scroll']['driver']
         for finger in [5, 40, 150, 400]:
-            per_event = driver['units_per_mm'] * finger / driver['event_rate_hz']
-            contact = [(1 + k / driver['event_rate_hz'], 0.0, per_event) for k in range(60)]
-            out = s.simulate(value, contact)
-            steady = out[50][2] * driver['points_per_unit'] * driver['event_rate_hz']
-            self.assertAlmostEqual(steady / s.steady_points(value, finger), 1, places=9)
+            out = s.simulate(value, stroke(finger))
+            per_second = sum(row[2] for row in out if 1.3 <= row[0] < 1.4) / 0.1
+            unrounded = per_second * DRIVER['points_per_unit']
+            self.assertAlmostEqual(unrounded / s.steady_points(value, finger, rounded=False), 1, delta=0.02,
+                                   msg=f'{finger} mm/s')
+
+    def test_apps_get_whole_points_and_at_least_one_per_event(self):
+        out = s.simulate(profile(), stroke(3))
+        moving = [row for row in out if row[2]]
+        self.assertTrue(all(row[4] == math.ceil(row[2] * 10 - 1e-9) for row in moving))
+        self.assertTrue(all(row[4] >= 1 for row in moving))
+        self.assertGreater(sum(row[4] for row in moving), 10 * sum(row[2] for row in moving))
 
     def test_momentum_starts_only_above_the_release_minimum(self):
         value = profile()
-        slow = [(1 + k / 123.4, 0.0, 0.3) for k in range(30)]
-        fast = [(1 + k / 123.4, 0.0, 8.0) for k in range(30)]
-        self.assertFalse(any(row[3] for row in s.simulate(value, slow)))
-        flick = s.simulate(value, fast)
-        momentum = [row for row in flick if row[3]]
+        self.assertFalse(any(row[5] for row in s.simulate(value, stroke(0.2))))
+        flick = s.simulate(value, stroke(150))
+        momentum = [row for row in flick if row[5]]
         self.assertGreater(len(momentum), 30)
-        self.assertTrue(all(row[2] > 0 for row in momentum))
+        self.assertTrue(all(row[2] > 0 and row[4] >= 1 for row in momentum))
         self.assertAlmostEqual(momentum[1][0] - momentum[0][0], 1 / 120)
+        self.assertAlmostEqual(momentum[0][0], 1 + 59 / 120 + 1 / 120)    # one frame after the last
 
 
 class ConversionTests(unittest.TestCase):
@@ -241,7 +278,7 @@ class ConversionTests(unittest.TestCase):
     def test_samples_follow_the_steady_curve(self):
         value = profile()
         result = s.convert(value, 98.65, 1.0)
-        for speed in [10, 50, 200]:
+        for speed in [50, 100, 200]:  # above the one-point-per-event floor of slow strokes
             units = speed * 98.65 / 1000
             expected = s.steady_points(value, speed) / 1000
             self.assertAlmostEqual(pp.interpolate(result['step'], result['points'], units) / expected, 1, delta=0.02)

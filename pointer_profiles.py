@@ -27,10 +27,11 @@ DISPLAY_KEYS = {'points_wide', 'pixels_wide', 'width_mm'}
 SCROLL_KEYS = {'speed', 'curves', 'resolution', 'report_rate_hz', 'momentum_rate_hz', 'natural', 'driver'}
 SCROLL_DRIVER_RANGES = {
     'units_per_mm': (0.01, 1000),      # raw scroll units per mm of two-finger travel
-    'event_rate_hz': (30, 1000),       # scroll events per second while fingers move
-    'points_per_unit': (0.01, 1000),   # points of scrolling per accelerated scroll unit
-    'release_ms': (1, 500),            # contact history that sets the first momentum delta
-    'release_gain': (0.01, 100),       # first momentum delta ÷ that history's mean delta
+    'frame_rate_hz': (30, 1000),       # finger frames per second
+    'split_min': (0, 1000),            # raw units a frame must move to become two events
+    'points_per_unit': (0.01, 1000),   # points per accelerated unit, before rounding up
+    'release_ms': (1, 500),            # finger history that sets the first momentum velocity
+    'release_gain': (0.01, 100),       # first momentum velocity ÷ that history's mean velocity
     'release_min': (0, 100000),        # slowest release (raw units/s) that starts momentum
     'decay_fast': (0.5, 1),            # momentum decay per 8 ms at and above decay_velocity
     'decay_slow': (0.5, 1),            # … blending to this as momentum approaches rest
