@@ -106,6 +106,13 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(self.profile['driver']['verified'].startswith('probe '))
 
 
+def synthetic_driver():
+    spec = importlib.util.spec_from_file_location('test_scroll_check', HERE / 'test_scroll_check.py')
+    synthetic = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(synthetic)
+    return dict(synthetic.TRUTH)
+
+
 class ScrollExportTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -184,6 +191,34 @@ class ScrollExportTests(unittest.TestCase):
         with mock.patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             e.main()
         self.assertEqual(target.read_text(), before)
+
+    def test_add_scroll_keeps_the_checked_pointer_half(self):
+        checked = pp.load_profile(PROFILE.read_bytes())
+        fresh = json.loads(json.dumps(checked))
+        fresh['driver'] = dict(fresh['driver'], verified='', event_rate_hz=120)
+        fresh['source'] = dict(fresh['source'], os='macOS 15.8 (24H1)', exported='2026-10-04T10:00:00Z', exporter=2)
+        scroll = {'speed': 0.5, 'resolution': 400.0, 'report_rate_hz': 67.0, 'momentum_rate_hz': 120.0,
+                  'natural': False, 'driver': None,
+                  'curves': [dict(zip(pp.CURVE_KEYS, (0, 65536, 0, 0, 0, 393216, 786432)))]}
+        fresh.update(version=2, scroll=scroll)
+        merged = e.add_scroll(checked, fresh)
+        self.assertEqual(merged['version'], 2)
+        self.assertEqual(merged['driver'], checked['driver'])  # the probe-verified pointer constants
+        self.assertEqual(merged['scroll'], scroll)
+        self.assertEqual(merged['source']['scroll_os'], 'macOS 15.8 (24H1)')
+        self.assertEqual(merged['source']['exported'], checked['source']['exported'])
+        self.assertEqual(e.add_scroll(merged, fresh)['scroll'], scroll)  # a re-export replaces it
+        for change, message in [({'curves': fresh['curves'][:1]}, 'pointer curves'),
+                                ({'display': dict(fresh['display'], points_wide=1800)}, 'display'),
+                                ({'source': dict(fresh['source'], model='Mac14,9')}, 'model')]:
+            with self.assertRaisesRegex(SystemExit, message):
+                e.add_scroll(checked, dict(fresh, **change))
+        with self.assertRaisesRegex(SystemExit, 'no scroll curves'):
+            e.add_scroll(checked, checked)
+        measured = json.loads(json.dumps(merged))
+        measured['scroll']['driver'] = dict(synthetic_driver(), verified='probe')
+        with self.assertRaisesRegex(SystemExit, 'already has measured'):
+            e.add_scroll(pp.validate_profile(measured), fresh)
 
     def test_pointer_only_profiles_cannot_be_scroll_checked(self):
         argv = ['export-profile.py', '--check-scroll', str(self.root / 'x.csv'), '--profile', str(PROFILE)]

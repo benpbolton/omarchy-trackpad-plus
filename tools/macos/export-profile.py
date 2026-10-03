@@ -120,6 +120,26 @@ def scroll_section(device):
         'driver': None})
 
 
+def add_scroll(profile, fresh):
+    """Copy a fresh export's scroll section into a checked pointer profile from the same Mac.
+
+    The pointer half, including its measured driver constants, stays as it is; a profile from
+    another Mac, display setting or curve set is refused rather than mixed.
+    """
+    if 'scroll' not in fresh:
+        raise SystemExit('This Mac exported no scroll curves; see the message above.')
+    for key, label in (('curves', 'pointer curves'), ('display', 'built-in display (check Displays → scaling)')):
+        if fresh[key] != profile[key]:
+            raise SystemExit(f'The {label} differ from the profile; it was not exported on this Mac as it is now.')
+    if fresh['source'].get('model') != profile['source'].get('model'):
+        raise SystemExit('The profile comes from a different Mac model.')
+    if (profile.get('scroll') or {}).get('driver'):
+        raise SystemExit('The profile already has measured scrolling; remove its scroll section to start over.')
+    source = dict(profile['source'], exporter=2, scroll_os=fresh['source']['os'],
+                  scroll_exported=fresh['source']['exported'])
+    return pp.validate_profile(dict(profile, version=2, scroll=fresh['scroll'], source=source))
+
+
 def builtin_display():
     screens = json.loads(run('osascript', '-l', 'JavaScript', '-e', DISPLAY_SCRIPT))
     screen = next((s for s in screens if s['builtin']), None)
@@ -299,6 +319,8 @@ def main():
     parser.add_argument('--linux-width-mm', type=float, help='Linux panel width in mm (default: profile panel)')
     parser.add_argument('--check', type=Path, metavar='PROBE_CSV', help='compare a probe.swift recording with --profile')
     parser.add_argument('--profile', type=Path, help='profile to check (and update with --write)')
+    parser.add_argument('--add-scroll', type=Path, metavar='PROFILE',
+                        help="add this Mac's scroll curves to a checked profile from it, keeping its pointer half")
     parser.add_argument('--check-scroll', type=Path, metavar='SCROLL_CSV',
                         help='compare a scroll-probe.swift recording with --profile')
     parser.add_argument('--write', action='store_true', help='store the measured driver constants in --profile')
@@ -357,6 +379,12 @@ def main():
         return
     if not 0 <= args.device < len(devices):
         raise SystemExit(f'Choose --device 0 to {len(devices) - 1}; see --list.')
+    if args.add_scroll:
+        profile = add_scroll(pp.load_profile(args.add_scroll.read_bytes()), export(devices[args.device]))
+        args.add_scroll.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + '\n')
+        print(f"Added {len(profile['scroll']['curves'])} scroll curves at speed {profile['scroll']['speed']:g} "
+              f"to {args.add_scroll}; run the scroll check next.")
+        return
     profile = export(devices[args.device])
     stem = re.sub(r'[^A-Za-z0-9.]+', '-', profile['source']['model'] or 'mac')
     output = args.output or Path(f'{stem}.json')

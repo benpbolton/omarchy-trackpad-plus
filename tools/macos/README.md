@@ -17,10 +17,12 @@ python3 tools/macos/export-profile.py --check probe.csv --profile <model>.json -
 python3 tools/macos/export-profile.py --preview <model>.json --hyprland-scale 2
 ```
 
-For scrolling, export with this version of the exporter (it adds the scroll curves as profile
-version 2), then record two minutes of two-finger scrolling without changing any setting:
+For scrolling, add the scroll curves to a checked profile from the same Mac (profile version 2;
+its pointer half is kept), then record two minutes of two-finger scrolling without changing any
+setting. `tasks/todo-mac.md` walks an agent through the whole session.
 
 ```sh
+python3 tools/macos/export-profile.py --add-scroll <model>.json
 swiftc -O tools/macos/scroll-probe.swift -o /tmp/scroll-probe
 /tmp/scroll-probe scroll.csv                   # slow, normal, flicks, stopped and sideways
 python3 tools/macos/export-profile.py --check-scroll scroll.csv --profile <model>.json --write
