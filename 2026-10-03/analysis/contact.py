@@ -1,7 +1,8 @@
+from pathlib import Path
 import json, math, statistics as st, sys, collections
 sys.path[:0] = ['.', 'tools/macos']
 import pointer_profiles as pp, scroll_profiles as sp, scroll_check as c
-profile = pp.load_profile(open('tools/macos/profiles/MacBookPro18-3.json', 'rb').read())
+profile = pp.load_profile(open(Path(__file__).resolve().parent.parent / 'profile-after-check.json', 'rb').read())
 rows = c.read_recording(sys.argv[1])['scroll']
 
 class Probe(sp.ScrollAccelerator):

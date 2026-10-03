@@ -12,5 +12,7 @@ is off, and inertia is on. Results: `tasks/results-mac-scrolling.md` on `feat/ma
 - `ioreg-scroll.txt`, `hidutil-scroll.txt`: where the scroll keys live, and the live
   `IOHIDScrollAccelerator`. Identifier keys and values are removed.
 - `profile-after-check.json`: the version-2 profile from `--add-scroll` (`driver: null`).
-- `analysis/`: the Troubleshooting C scripts. Run them from the repository root with a
-  decompressed CSV, for example `python3 hyp.py scroll-3.csv`.
+- `analysis/`: the Troubleshooting C scripts. They read `profile-after-check.json` and the
+  repository's `scroll_profiles.py`. Run them from the repository root with a decompressed CSV:
+  `gzip -dc 2026-10-03/scroll-3.csv.gz > /tmp/scroll-3.csv && python3 2026-10-03/analysis/hyp.py /tmp/scroll-3.csv`
+  (with paths adjusted to wherever this branch is checked out).
