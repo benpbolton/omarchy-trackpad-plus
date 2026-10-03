@@ -7,8 +7,9 @@ Run on macOS with the system python3; no permissions or extra packages are neede
     python3 tools/macos/export-profile.py --list     # shows the trackpads that can be exported
     python3 tools/macos/export-profile.py --preview PROFILE --units-per-mm 98.65 --hyprland-scale 2
 
-The profile copies Apple's own curves from `ioreg` (HIDAccelCurves) and the current tracking
-speed. See tools/macos/README.md for the math and the 30-second check (probe.swift).
+The profile copies Apple's own curves from `ioreg` (HIDAccelCurves and HIDScrollAccelCurves)
+and the current tracking and scrolling speeds. See tools/macos/README.md for the math, the
+30-second pointer check (probe.swift) and the two-minute scroll check (scroll-probe.swift).
 """
 import argparse
 import datetime
@@ -21,7 +22,10 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pointer_profiles as pp  # noqa: E402
+import scroll_check  # noqa: E402
+import scroll_profiles as sp  # noqa: E402
 
 CURVE_KEYS = {'index': 'HIDAccelIndex', 'linear': 'HIDAccelGainLinear', 'parabolic': 'HIDAccelGainParabolic',
               'cubic': 'HIDAccelGainCubic', 'quartic': 'HIDAccelGainQuartic',
@@ -39,6 +43,10 @@ for (var i = 0; i < screens.count; i++) {
 JSON.stringify(out);
 '''
 PREVIEW_SPEEDS = [2, 5, 10, 20, 50, 100, 200, 300, 500, 800]
+# Which user default holds the speed when the service does not publish it (HIDScrollAccelerationType).
+SCROLL_DEFAULTS = {'HIDTrackpadScrollAcceleration': 'com.apple.trackpad.scrolling',
+                   'HIDMouseScrollAcceleration': 'com.apple.scrollwheel.scaling',
+                   'HIDScrollAcceleration': 'com.apple.scrollwheel.scaling'}
 CHECK_BANDS = [(8, 15), (15, 30), (30, 64), (64, 127), (127, 254), (254, 508)]  # finger mm/s
 MIN_WINDOWS = 50  # steady 7-event windows a band needs before it counts toward the gate
 
@@ -66,6 +74,50 @@ def tracking_speed():
             return value / pp.FIXED
     scaling = float(run('defaults', 'read', '-g', 'com.apple.trackpad.scaling'))
     return round(scaling * pp.FIXED) / pp.FIXED
+
+
+def scroll_section(device):
+    """HIDScrollAccelCurves and the constants IOHIDPointerScrollFilter reads, or None.
+
+    Values are kept exactly as IOHIDFamily interprets them (16.16 resolution and report rate,
+    67 Hz without one, 60 Hz momentum without ScrollMomentumDispatchRate); the scroll check
+    then proves the interpretation event by event.
+    """
+    sources = [device] + ioreg('-c', 'AppleMultitouchTrackpadHIDEventDriver') + ioreg('-k', 'HIDEventServiceProperties')
+
+    def find(key):
+        for source in sources:
+            for table in (source, source.get('HIDEventServiceProperties')):
+                if isinstance(table, dict) and table.get(key) is not None:
+                    return table[key]
+        return None
+
+    curves = find('HIDScrollAccelCurves')
+    resolution = find('HIDScrollResolutionY') or find('HIDScrollResolution')
+    if not curves or not resolution:
+        print('This trackpad publishes no scroll curves; the profile covers the pointer only.')
+        return None
+    kind = find('HIDScrollAccelerationType') or 'HIDTrackpadScrollAcceleration'
+    speed = find(kind)
+    if isinstance(speed, int):
+        speed /= pp.FIXED
+    else:
+        speed = round(float(run('defaults', 'read', '-g', SCROLL_DEFAULTS.get(kind, 'com.apple.trackpad.scrolling')))
+                      * pp.FIXED) / pp.FIXED
+    if speed < 0:
+        print('Scroll acceleration is turned off on this Mac; the profile covers the pointer only.')
+        return None
+    rate, dispatch = find('HIDScrollReportRate'), find('ScrollMomentumDispatchRate')
+    try:
+        natural = run('defaults', 'read', '-g', 'com.apple.swipescrolldirection').strip() != b'0'
+    except subprocess.CalledProcessError:
+        natural = True  # macOS default
+    return pp.validate_scroll({
+        'speed': speed, 'resolution': resolution / pp.FIXED,
+        'report_rate_hz': rate / pp.FIXED if rate else pp.FRAME_RATE,
+        'momentum_rate_hz': float(dispatch) if dispatch else sp.DEFAULT_DISPATCH_RATE, 'natural': natural,
+        'curves': [{key: int(curve.get(field, 0)) for key, field in CURVE_KEYS.items()} for curve in curves],
+        'driver': None})
 
 
 def builtin_display():
@@ -105,8 +157,11 @@ def export(device):
         'source': {'os': f'macOS {version} ({build})', 'model': hardware.get('machine_model', ''),
                    'device': device.get('Product', 'Trackpad'), 'transport': device.get('Transport', ''),
                    'exported': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-                   'exporter': 1},
+                   'exporter': 2},
     }
+    scroll = scroll_section(device)
+    if scroll:
+        profile.update(version=2, scroll=scroll)
     return pp.validate_profile(profile)
 
 
@@ -123,6 +178,21 @@ def preview(profile, units_per_mm, monitor):
     print('Largest difference from macOS by finger speed (mm/s): '
           + ', '.join(f'{band} {error:.1f} %' for band, error in result['error_bands'].items()))
     print(f"\naccel_profile = \"{result['native']}\"")
+    scroll = profile.get('scroll')
+    if not scroll:
+        return
+    if not scroll['driver']:
+        print('\nScrolling: run the scroll check (scroll-probe.swift) to measure the driver first.')
+        return
+    result = sp.convert(profile, units_per_mm, pp.px_per_point(mm_per_point, monitor))
+    print(f"\nScrolling at speed {scroll['speed']:g} (momentum is not part of libinput's curve)")
+    print(' finger mm/s   macOS pt/s   scroll mm per finger mm')
+    for speed in PREVIEW_SPEEDS:
+        points = sp.steady_points(profile, speed)
+        print(f'{speed:12g}   {points:10.0f}   {points * mm_per_point / speed:23.3f}')
+    print('Largest difference from macOS by finger speed (mm/s): '
+          + ', '.join(f'{band} {error:.1f} %' for band, error in result['error_bands'].items()))
+    print(f"\nscroll_points = \"{result['native']}\"")
 
 
 def read_probe(path):
@@ -229,8 +299,26 @@ def main():
     parser.add_argument('--linux-width-mm', type=float, help='Linux panel width in mm (default: profile panel)')
     parser.add_argument('--check', type=Path, metavar='PROBE_CSV', help='compare a probe.swift recording with --profile')
     parser.add_argument('--profile', type=Path, help='profile to check (and update with --write)')
+    parser.add_argument('--check-scroll', type=Path, metavar='SCROLL_CSV',
+                        help='compare a scroll-probe.swift recording with --profile')
     parser.add_argument('--write', action='store_true', help='store the measured driver constants in --profile')
     args = parser.parse_args()
+
+    if args.check_scroll:
+        if not args.profile:
+            raise SystemExit('--check-scroll needs --profile PROFILE.json')
+        profile = pp.load_profile(args.profile.read_bytes())
+        if 'scroll' not in profile:
+            raise SystemExit('This profile has no scroll curves; export it again with this exporter first.')
+        result = scroll_check.check_scroll(profile, scroll_check.read_recording(args.check_scroll))
+        passed, summary = scroll_check.report(result)
+        if args.write and passed:
+            profile['scroll']['driver'] = dict(result['driver'], verified=f'{datetime.date.today().isoformat()} {summary}')
+            args.profile.write_text(json.dumps(pp.validate_profile(profile), indent=2, ensure_ascii=False) + '\n')
+            print(f'Updated {args.profile}.')
+        elif args.write:
+            raise SystemExit('Not updating the profile because the check failed.')
+        return
 
     if args.check:
         if not args.profile:
@@ -273,7 +361,8 @@ def main():
     stem = re.sub(r'[^A-Za-z0-9.]+', '-', profile['source']['model'] or 'mac')
     output = args.output or Path(f'{stem}.json')
     output.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + '\n')
-    print(f"Wrote {output} — {profile['name']}, {len(profile['curves'])} curves.")
+    scroll = f", {len(profile['scroll']['curves'])} scroll curves" if 'scroll' in profile else ''
+    print(f"Wrote {output} — {profile['name']}, {len(profile['curves'])} curves{scroll}.")
     print('Copy it to ~/.config/trackpad-plus/profiles/ on Omarchy and choose it under Pointer feel → macOS.')
 
 

@@ -38,8 +38,13 @@ This release identifier is separate from the backend's settings schema version.
   accelerator (IOHIDFamily) and its conversion to a 64-point libinput custom
   curve, shared with the macOS exporter. The sources behind its constants are
   linked in `tools/macos/README.md`.
-- `tools/macos/`: the exporter, the optional 30-second check (`probe.swift`), and
-  a checked profile. These run on macOS and are never loaded by the plugin.
+- `scroll_profiles.py`: stdlib-only model of macOS two-finger scrolling: a line-by-line
+  port of IOHIDScrollAccelerator, WebKit's momentum decay, and a steady-state `scroll_points`
+  converter. Profile version 2 adds its `scroll` section; `driver` stays null until the
+  scroll check has measured the closed multitouch driver.
+- `tools/macos/`: the exporter, the optional 30-second pointer check (`probe.swift`), the
+  two-minute scroll check (`scroll-probe.swift`, analysed by `scroll_check.py`), and a
+  checked profile. These run on macOS and are never loaded by the plugin.
 - `gestures.py` / `GestureEditor.qml`: global workspace gestures, explicit
   adoption of literal bindings in input.lua, marked-block persistence and
   compare-before-restore recovery. Uses the existing bounded subprocesses,
@@ -135,6 +140,8 @@ Controls/Test, and Qt development tools (`qmllint`, `qmltestrunner`):
 python3 test_trackpads.py
 python3 test_pointer_profiles.py
 python3 tools/macos/test_export_profile.py
+python3 test_scroll_profiles.py
+python3 tools/macos/test_scroll_check.py
 python3 test_gestures.py
 node test-selection.js
 node test-overview-model.js

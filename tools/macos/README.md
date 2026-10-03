@@ -17,6 +17,17 @@ python3 tools/macos/export-profile.py --check probe.csv --profile <model>.json -
 python3 tools/macos/export-profile.py --preview <model>.json --hyprland-scale 2
 ```
 
+For scrolling, export with this version of the exporter (it adds the scroll curves as profile
+version 2), then record two minutes of two-finger scrolling without changing any setting:
+
+```sh
+swiftc -O tools/macos/scroll-probe.swift -o /tmp/scroll-probe
+/tmp/scroll-probe scroll.csv                   # slow, normal, flicks, stopped and sideways
+python3 tools/macos/export-profile.py --check-scroll scroll.csv --profile <model>.json --write
+```
+
+Keep `scroll.csv`: it holds no identifiers, and the scroll model is refined against it.
+
 The export records all of the trackpad's curves, the current **Tracking speed** (only the
 starting position of the slider in Trackpad Plus), and the built-in display's size, so the
 cursor can travel the same physical distance on Linux. `--check` measures the
@@ -57,6 +68,40 @@ For steady finger speed `v` (in/s), counts per event are `400·v/r`, so the curs
 `T(v) = (96·r/67)·f(67·v/r)` points per second at event rate `r`. `pointer_profiles.py`
 implements each step; `test_pointer_profiles.py` checks it against a simulation of Apple's
 per-event code.
+
+## How macOS scrolls a trackpad
+
+Sources: the same IOHIDFamily release, and WebKit's
+[`MomentumEventDispatcher.cpp`](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/WebProcess/WebPage/MomentumEventDispatcher.cpp),
+which rebuilds the system's momentum so Safari can draw it at the display's refresh rate.
+`scroll_profiles.py` implements each step.
+
+1. The closed multitouch driver turns two-finger motion into raw scroll deltas with phases
+   and, after the fingers lift, sends momentum deltas — at the display's rate on ProMotion,
+   with a `ScrollMomentumDispatchRate` attachment — until they decay or a finger lands.
+2. [`IOHIDPointerScrollFilter::accelerateEvent`](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDPointerScrollFilter.cpp#L567-L622)
+   accelerates every non-zero delta on each axis separately, momentum included; a momentum
+   delta is scaled to 60 Hz around the call. Zero deltas never reach the history.
+3. [`IOHIDScrollAccelerator::accelerate`](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDAcceleration.cpp#L35-L117)
+   keeps history, unlike the pointer: it averages the last eight deltas and their intervals,
+   stopping at an interval over 150 ms or 500 ms in total, and starts over on a direction
+   change or a 500 ms pause. The velocity is `(2t² − 955t + 98369)/65536 × average delta`
+   at average interval `t` ms ([constants](https://github.com/apple-oss-distributions/IOHIDFamily/blob/IOHIDFamily-2115.140.4/IOHIDEventSystemPlugIns/IOHIDAcceleration.hpp#L21-L30));
+   the delta is multiplied by `f(v × rate / resolution) × 96/67 ÷ v × 0.1`, where `f` is
+   `HIDScrollAccelCurves` at the scrolling speed, `rate` is `HIDScrollReportRate` or 67, and
+   `resolution` is `HIDScrollResolution`.
+4. Momentum, as WebKit reproduces it: the first frame carries the release delta; each later
+   frame decays by `α^(frame ÷ 8 ms)`, with `α` 0.975 for fast glides blending to 0.91 below
+   250 raw units/s; it ends below 30 units/s on both axes. WebKit builds this at 60 Hz and
+   samples it at the display's rate; generating 120 Hz frames directly would glide about 5 %
+   less, so the scroll check measures which one macOS does.
+5. WindowServer and AppKit turn the accelerated value into points; natural scrolling only
+   flips the sign. Rubber-banding at the end of a page belongs to each app.
+
+The scroll check measures what the closed driver keeps to itself: raw units per mm of finger
+travel, its event rate, how the last moments of contact set the first momentum delta, the
+slowest flick that glides, and the decay. It first replays every recorded raw delta through
+the port of step 3 and requires Apple's own accelerated value back, event by event.
 
 ## How Linux receives it
 
@@ -119,6 +164,24 @@ python3 ~/.config/omarchy/plugins/davefano.trackpad-plus/trackpads.py \
 The value replaces the group's whole map, so list every interface you have measured. It is
 stored as settings metadata and never sent to Hyprland. Trackpad Plus itself never
 reads input devices or runs as root.
+
+## What Linux can copy of scrolling
+
+- libinput's custom profile also takes a scroll curve (`scroll_points`, the same units as the
+  pointer curve). It has no history and accelerates the combined speed, where Apple averages
+  each axis on its own, so it can only follow Apple's steady-state curve
+  (`scroll_profiles.convert`).
+- libinput never generates momentum. On Wayland each app starts its own glide when the
+  compositor sends `axis_stop`: GTK 4 from the last 150 ms of deltas with friction 4,
+  Chromium from a regression of recent deltas unless the stop comes 200 ms late, and Qt
+  widgets and terminals not at all.
+- Hyprland 0.56 emits each touchpad axis event to plugins after libinput (natural scrolling
+  already applied) and before `scroll_factor`; a listener receives a copy, so a plugin has to
+  cancel the event and send its own. A finger-source value of 0 becomes `axis_stop`.
+
+Exact scrolling therefore needs a compositor plugin that runs Apple's accelerator on
+libinput's unaccelerated deltas and sends macOS's momentum itself, ending each glide slowly
+enough that no app adds its own.
 
 ## What a curve cannot copy
 

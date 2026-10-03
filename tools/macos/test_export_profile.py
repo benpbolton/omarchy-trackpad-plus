@@ -106,5 +106,90 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(self.profile['driver']['verified'].startswith('probe '))
 
 
+class ScrollExportTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def section(self, device, services, defaults=None):
+        defaults = defaults or {}
+
+        def ioreg(*arguments):
+            return services.get(arguments[1], [])
+
+        def run(*command):
+            if command[-1] in defaults:
+                return defaults[command[-1]]
+            raise e.subprocess.CalledProcessError(1, command)
+        with mock.patch.object(e, 'ioreg', ioreg), mock.patch.object(e, 'run', run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return e.scroll_section(device)
+
+    def curves(self):
+        return [{'HIDAccelIndex': 0, 'HIDAccelGainLinear': 65536, 'HIDAccelTangentSpeedLinear': 393216},
+                {'HIDAccelIndex': 65536, 'HIDAccelGainLinear': 49152, 'HIDAccelGainParabolic': 104858,
+                 'HIDAccelTangentSpeedLinear': 458752, 'HIDAccelTangentSpeedParabolicRoot': 786432}]
+
+    def test_reads_curves_and_service_settings_as_iohidfamily_does(self):
+        device = {'HIDScrollAccelCurves': self.curves(), 'HIDScrollResolution': 400 << 16}
+        services = {'HIDEventServiceProperties': [{'HIDEventServiceProperties': {
+            'HIDScrollAccelerationType': 'HIDTrackpadScrollAcceleration',
+            'HIDTrackpadScrollAcceleration': 20480, 'ScrollMomentumDispatchRate': 120}}]}
+        scroll = self.section(device, services, {'com.apple.swipescrolldirection': b'0\n'})
+        self.assertEqual(scroll['speed'], 0.3125)
+        self.assertEqual(scroll['resolution'], 400)
+        self.assertEqual(scroll['report_rate_hz'], 67.0)  # FRAME_RATE without HIDScrollReportRate
+        self.assertEqual(scroll['momentum_rate_hz'], 120.0)
+        self.assertFalse(scroll['natural'])
+        self.assertIsNone(scroll['driver'])
+        self.assertEqual(scroll['curves'][1], {'index': 65536, 'linear': 49152, 'parabolic': 104858, 'cubic': 0,
+                                               'quartic': 0, 'tangent_linear': 458752, 'tangent_root': 786432})
+
+    def test_falls_back_to_user_defaults_and_macos_defaults(self):
+        device = {'HIDScrollAccelCurves': self.curves(), 'HIDScrollResolution': 400 << 16,
+                  'HIDScrollReportRate': 120 << 16}
+        scroll = self.section(device, {}, {'com.apple.trackpad.scrolling': b'0.5\n'})
+        self.assertEqual(scroll['speed'], 0.5)
+        self.assertEqual(scroll['report_rate_hz'], 120.0)
+        self.assertEqual(scroll['momentum_rate_hz'], 60.0)
+        self.assertTrue(scroll['natural'])
+
+    def test_missing_curves_or_disabled_acceleration_leave_pointer_only(self):
+        self.assertIsNone(self.section({'HIDScrollResolution': 400 << 16}, {}))
+        device = {'HIDScrollAccelCurves': self.curves(), 'HIDScrollResolution': 400 << 16,
+                  'HIDTrackpadScrollAcceleration': -65536}
+        self.assertIsNone(self.section(device, {}))
+
+    def test_check_scroll_writes_the_driver_only_after_a_pass(self):
+        spec = importlib.util.spec_from_file_location('test_scroll_check', HERE / 'test_scroll_check.py')
+        synthetic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(synthetic)
+        probe, target = self.root / 'scroll.csv', self.root / 'profile.json'
+        profile = synthetic.recording(probe)
+        profile['scroll']['driver'] = None
+        target.write_text(json.dumps(profile))
+        argv = ['export-profile.py', '--check-scroll', str(probe), '--profile', str(target), '--write']
+        with mock.patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()):
+            e.main()
+        driver = json.loads(target.read_text())['scroll']['driver']
+        self.assertEqual(driver['release_ms'], 33)
+        self.assertIn('accelerator median error', driver['verified'])
+        output = io.StringIO()
+        with mock.patch('sys.argv', ['export-profile.py', '--preview', str(target)]), contextlib.redirect_stdout(output):
+            e.main()
+        self.assertIn('scroll_points = "', output.getvalue())
+        synthetic.recording(probe, accelerator_bias=1.05)
+        before = target.read_text()
+        with mock.patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            e.main()
+        self.assertEqual(target.read_text(), before)
+
+    def test_pointer_only_profiles_cannot_be_scroll_checked(self):
+        argv = ['export-profile.py', '--check-scroll', str(self.root / 'x.csv'), '--profile', str(PROFILE)]
+        with mock.patch('sys.argv', argv), self.assertRaisesRegex(SystemExit, 'no scroll curves'):
+            e.main()
+
+
 if __name__ == '__main__':
     unittest.main()
