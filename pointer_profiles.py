@@ -2,8 +2,9 @@
 """macOS pointer profiles: validation, Apple's acceleration curve, and libinput points.
 
 A profile records the acceleration curves and tracking speed a Mac exposes in `ioreg`, so
-the same transfer function can be rebuilt for libinput. Shared by trackpads.py and
-tools/macos/export-profile.py; tools/macos/README.md cites the source of every constant.
+the same transfer function can be rebuilt for libinput. Version 2 adds the scroll curves that
+scroll_profiles.py models. Shared by trackpads.py and tools/macos/export-profile.py;
+tools/macos/README.md cites the source of every constant.
 """
 import hashlib
 import json
@@ -21,6 +22,22 @@ CURVE_KEYS = ('index', 'linear', 'parabolic', 'cubic', 'quartic', 'tangent_linea
 PROFILE_KEYS = {'format', 'version', 'kind', 'name', 'tracking_speed', 'curves', 'driver', 'display', 'source'}
 DRIVER_KEYS = {'resolution_dpi', 'report_rate_hz', 'event_rate_hz', 'counts_per_inch', 'deltas', 'verified'}
 DISPLAY_KEYS = {'points_wide', 'pixels_wide', 'width_mm'}
+# Version 2 adds two-finger scrolling (scroll_profiles.py). `driver` stays null until the
+# scroll check has measured the closed multitouch driver's constants.
+SCROLL_KEYS = {'speed', 'curves', 'resolution', 'report_rate_hz', 'momentum_rate_hz', 'natural', 'driver'}
+SCROLL_DRIVER_RANGES = {
+    'units_per_mm': (0.01, 1000),      # raw scroll units per mm of two-finger travel
+    'event_rate_hz': (30, 1000),       # scroll events per second while fingers move
+    'points_per_unit': (0.01, 1000),   # points of scrolling per accelerated scroll unit
+    'release_ms': (1, 500),            # contact history that sets the first momentum delta
+    'release_gain': (0.01, 100),       # first momentum delta ÷ that history's mean delta
+    'release_min': (0, 100000),        # slowest release (raw units/s) that starts momentum
+    'decay_fast': (0.5, 1),            # momentum decay per 8 ms at and above decay_velocity
+    'decay_slow': (0.5, 1),            # … blending to this as momentum approaches rest
+    'decay_velocity': (1, 100000),     # raw units/s
+    'stop_velocity': (0, 100000),      # raw units/s per axis at which momentum ends
+    'momentum_table_hz': (0, 1000),    # rate the momentum curve is built at; 0: each frame directly
+}
 DELTA_MODELS = ('ideal', 'integer', 'fractional')
 ERROR_BANDS = ((1.5, 3), (3, 6), (6, 600), (600, 800), (800, 1200))  # finger speed, mm/s
 PLOT_SPEEDS = [1] + list(range(10, 410, 10))  # finger speed, mm/s
@@ -39,16 +56,8 @@ def text(value, limit, empty=False):
     return value
 
 
-def validate_profile(value):
-    if not isinstance(value, dict) or set(value) != PROFILE_KEYS:
-        raise ValueError('Not a Trackpad Plus pointer profile')
-    if value['format'] != FORMAT or type(value['version']) is not int or value['version'] != 1:
-        raise ValueError('Unsupported pointer profile format or version')
-    if value['kind'] != 'apple-parametric':
-        raise ValueError('Unsupported pointer profile kind')
-    text(value['name'], 80)
-    number(value['tracking_speed'], 0, 3)
-    curves = value['curves']
+def validate_curves(curves):
+    """HIDAccelCurves or HIDScrollAccelCurves, as raw 16.16 integers in the device's order."""
     if not isinstance(curves, list) or not 1 <= len(curves) <= 16:
         raise ValueError('Expected 1 to 16 acceleration curves')
     previous = -1
@@ -65,6 +74,47 @@ def validate_profile(value):
             raise ValueError('Acceleration curve has no gain')
         if curve['tangent_linear'] and curve['tangent_root'] and curve['tangent_root'] <= curve['tangent_linear']:
             raise ValueError('Acceleration curve tangents are out of order')
+    return curves
+
+
+def validate_scroll(scroll):
+    if not isinstance(scroll, dict) or set(scroll) != SCROLL_KEYS:
+        raise ValueError('Invalid pointer profile scrolling')
+    number(scroll['speed'], 0, 10)
+    validate_curves(scroll['curves'])
+    # Literal 16.16 readings, even implausible ones: the scroll check proves the interpretation.
+    number(scroll['resolution'], 0.0001, 20000)
+    number(scroll['report_rate_hz'], 0.0001, 1000)
+    number(scroll['momentum_rate_hz'], 1, 1000)
+    if type(scroll['natural']) is not bool:
+        raise ValueError('Invalid pointer profile scrolling')
+    driver = scroll['driver']
+    if driver is None:
+        return scroll
+    if not isinstance(driver, dict) or set(driver) != set(SCROLL_DRIVER_RANGES) | {'verified'}:
+        raise ValueError('Invalid pointer profile scroll constants')
+    for key, (low, high) in SCROLL_DRIVER_RANGES.items():
+        number(driver[key], low, high)
+    if driver['decay_slow'] > driver['decay_fast']:
+        raise ValueError('Pointer profile momentum decay is out of order')
+    text(driver['verified'], 160, empty=True)
+    return scroll
+
+
+def validate_profile(value):
+    if not isinstance(value, dict) or not PROFILE_KEYS <= set(value) <= PROFILE_KEYS | {'scroll'}:
+        raise ValueError('Not a Trackpad Plus pointer profile')
+    if value['format'] != FORMAT or type(value['version']) is not int or value['version'] not in (1, 2):
+        raise ValueError('Unsupported pointer profile format or version')
+    if ('scroll' in value) != (value['version'] == 2):
+        raise ValueError('Only version 2 pointer profiles describe scrolling')
+    if value['kind'] != 'apple-parametric':
+        raise ValueError('Unsupported pointer profile kind')
+    text(value['name'], 80)
+    number(value['tracking_speed'], 0, 3)
+    validate_curves(value['curves'])
+    if value['version'] == 2:
+        validate_scroll(value['scroll'])
     driver = value['driver']
     if not isinstance(driver, dict) or set(driver) != DRIVER_KEYS:
         raise ValueError('Invalid pointer profile driver constants')
@@ -108,9 +158,12 @@ def digest(raw):
 
 
 def apple_parameters(profile):
+    return curve_parameters(profile['curves'], profile['tracking_speed'])
+
+
+def curve_parameters(curves, speed):
     """Mirror IOHIDParametricAcceleration::CreateWithParameters: linear in every parameter."""
-    rows = [{key: curve[key] / FIXED for key in CURVE_KEYS} for curve in profile['curves']]
-    speed = profile['tracking_speed']
+    rows = [{key: curve[key] / FIXED for key in CURVE_KEYS} for curve in curves]
     current = 0
     for position, row in enumerate(rows):
         if speed >= row['index']:

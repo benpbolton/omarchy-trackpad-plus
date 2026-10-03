@@ -207,7 +207,8 @@ class ValidationTests(unittest.TestCase):
         self.rejects(dict(profile(), extra=1), 'Not a')
         self.rejects(profile(format='other'), 'format')
         self.rejects(profile(version=True), 'format')
-        self.rejects(profile(version=2), 'format')
+        self.rejects(profile(version=2), 'version 2')  # scrolling is required from version 2
+        self.rejects(profile(version=3), 'format')
         self.rejects(profile(kind='sampled'), 'kind')
 
     def test_curves_are_sorted_have_gain_and_ordered_tangents(self):
