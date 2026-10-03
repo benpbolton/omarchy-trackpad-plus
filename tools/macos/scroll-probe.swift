@@ -198,7 +198,7 @@ final class Overlay: NSView {
         Scroll this page with TWO fingers. Do not click. Mix these in any order:
           1. slow, careful scrolling — stop, then lift your fingers
           2. ordinary scrolling at a normal pace
-          3. flicks: lift while moving and let the page glide to a stop (soft and hard)
+          3. flicks: lift while moving, then don't touch until the page has stopped (soft and hard)
           4. a flick, then touch the trackpad to stop the glide
           5. three or four quick flicks in a row, the same direction
           6. a few sideways scrolls and flicks
@@ -211,7 +211,8 @@ final class Overlay: NSView {
         }
         text += "\n\nCoverage   slow \(bar(c["slow", default: 0], 600))   normal \(bar(c["normal", default: 0], 600))"
         text += "   fast \(bar(c["fast", default: 0], 200))"
-        text += "\n           flicks \(bar(c["flick", default: 0], 25))   stopped \(bar(c["stopped", default: 0], 6))"
+        text += "\n           full glides \(bar(c["glide", default: 0], 12))   flicks \(bar(c["flick", default: 0], 25))"
+        text += "   stopped \(bar(c["stopped", default: 0], 6))"
         text += "   repeated \(bar(c["repeat", default: 0], 8))   sideways \(bar(c["sideways", default: 0], 300))"
         if hidFloat == nil || copyHIDEvent == nil {
             text += "\n\nHID values are unavailable on this macOS; the check will be limited."
@@ -329,6 +330,8 @@ func record(_ event: NSEvent) {
         lastMomentumBegan = event.timestamp
         momentumActive = true
     } else if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+        // Only a glide that ran out counts; a landing finger sets kIOHIDEventScrollMomentumInterrupted.
+        if hid.momentum >= 0 && hid.momentum & 0x10 == 0 { log.count("glide") }
         momentumActive = false
     }
 }
