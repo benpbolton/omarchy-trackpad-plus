@@ -206,6 +206,9 @@ final class Overlay: NSView {
         """
         text += remaining.map { String(format: "Recording… %.0f s left", $0) } ?? "Recording starts with the first scroll."
         text += "\n\(log.scrollEvents) scroll events · \(log.touchFrames) touch frames"
+        if log.scrollEvents > 50 && log.touchFrames == 0 {
+            text += "\nNO TOUCHES ARRIVING: click once in the middle of the page, then keep scrolling."
+        }
         text += "\n\nCoverage   slow \(bar(c["slow", default: 0], 600))   normal \(bar(c["normal", default: 0], 600))"
         text += "   fast \(bar(c["fast", default: 0], 200))"
         text += "\n           flicks \(bar(c["flick", default: 0], 25))   stopped \(bar(c["stopped", default: 0], 6))"
@@ -248,8 +251,9 @@ let window = ProbeWindow(contentRect: screen.frame, styleMask: .borderless, back
 window.level = .mainMenu + 1
 let root = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
 let scrollView = NSScrollView(frame: root.bounds)
-scrollView.hasVerticalScroller = true
-scrollView.hasHorizontalScroller = true
+// Touches go to the view under the pointer, so keep the page the only view there: no scrollers.
+scrollView.hasVerticalScroller = false
+scrollView.hasHorizontalScroller = false
 scrollView.autoresizingMask = [.width, .height]
 let paper = Paper(frame: NSRect(x: 0, y: 0, width: 1_000_000, height: 4_000_000))
 paper.allowedTouchTypes = [.indirect]
