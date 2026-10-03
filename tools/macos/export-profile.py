@@ -336,6 +336,8 @@ def main():
         passed, summary = scroll_check.report(result)
         if args.write and passed:
             profile['scroll']['driver'] = dict(result['driver'], verified=f'{datetime.date.today().isoformat()} {summary}')
+            # The dispatch-rate attachment never reaches apps; keep the cadence the check measured.
+            profile['scroll']['momentum_rate_hz'] = result['momentum_rate_hz']
             args.profile.write_text(json.dumps(pp.validate_profile(profile), indent=2, ensure_ascii=False) + '\n')
             print(f'Updated {args.profile}.')
         elif args.write:

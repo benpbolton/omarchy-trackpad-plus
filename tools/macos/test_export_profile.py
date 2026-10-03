@@ -186,8 +186,9 @@ class ScrollExportTests(unittest.TestCase):
         with mock.patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()):
             e.main()
         driver = json.loads(target.read_text())['scroll']['driver']
-        self.assertEqual(driver['release_ms'], 33)
-        self.assertIn('accelerator median error', driver['verified'])
+        self.assertEqual(driver['release_ms'], 42)
+        self.assertEqual(json.loads(target.read_text())['scroll']['momentum_rate_hz'], 120.0)
+        self.assertIn('momentum accelerator', driver['verified'])
         output = io.StringIO()
         with mock.patch('sys.argv', ['export-profile.py', '--preview', str(target)]), contextlib.redirect_stdout(output):
             e.main()
