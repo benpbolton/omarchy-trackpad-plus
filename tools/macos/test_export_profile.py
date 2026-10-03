@@ -106,6 +106,12 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(self.profile['driver']['verified'].startswith('probe '))
 
 
+def pointer_profile():
+    """The checked-in profile's pointer half, whether or not scrolling has been added to it."""
+    profile = {key: value for key, value in pp.load_profile(PROFILE.read_bytes()).items() if key != 'scroll'}
+    return pp.validate_profile(dict(profile, version=1))
+
+
 def synthetic_driver():
     spec = importlib.util.spec_from_file_location('test_scroll_check', HERE / 'test_scroll_check.py')
     synthetic = importlib.util.module_from_spec(spec)
@@ -193,7 +199,7 @@ class ScrollExportTests(unittest.TestCase):
         self.assertEqual(target.read_text(), before)
 
     def test_add_scroll_keeps_the_checked_pointer_half(self):
-        checked = pp.load_profile(PROFILE.read_bytes())
+        checked = pointer_profile()
         fresh = json.loads(json.dumps(checked))
         fresh['driver'] = dict(fresh['driver'], verified='', event_rate_hz=120)
         fresh['source'] = dict(fresh['source'], os='macOS 15.8 (24H1)', exported='2026-10-04T10:00:00Z', exporter=2)
@@ -221,7 +227,9 @@ class ScrollExportTests(unittest.TestCase):
             e.add_scroll(pp.validate_profile(measured), fresh)
 
     def test_pointer_only_profiles_cannot_be_scroll_checked(self):
-        argv = ['export-profile.py', '--check-scroll', str(self.root / 'x.csv'), '--profile', str(PROFILE)]
+        pointer = self.root / 'pointer.json'
+        pointer.write_text(json.dumps(pointer_profile()))
+        argv = ['export-profile.py', '--check-scroll', str(self.root / 'x.csv'), '--profile', str(pointer)]
         with mock.patch('sys.argv', argv), self.assertRaisesRegex(SystemExit, 'no scroll curves'):
             e.main()
 
