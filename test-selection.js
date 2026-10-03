@@ -485,6 +485,40 @@ function context() {
   assert.equal(ctx.keyboardNavigationBlocked(), true, 'the scroll feel editor owns its keyboard input');
 }
 
+// macOS Scrolling speed on the main tab: Apple's stops, applied as a new file reference.
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  const converted = {name: 'Mac', file: 'mac.json', sha256: 'd'.repeat(64), scroll_speed: 0.3125, mac_speed: 0.3125,
+    speeds: [0, 0.125, 0.3125, 0.5, 1, 3], mm_per_point: 0.2, px_per_point: 1,
+    devices: {apple: {units_per_mm: 98.65, step: 0.1, points: [0, 1]}},
+    model: {curve: {}, resolution: 400, report_rate_hz: 67, driver: {}}};
+  ctx.devices[0].settings = {...ctx.devices[0].settings, accel_profile: 'custom', scroll_preset: 'imported',
+    imported_scroll: converted};
+  ctx.loadSelection();
+  ctx.deviceSettingsOpen = false;
+  ctx.activeTab = 'scrolling';
+  assert.deepEqual(Array.from(ctx.navigationSections().slice(-3)), ['scroll-feel', 'scroll-speed', 'natural']);
+  assert.equal(ctx.scrollSpeedStop(), 2);
+  assert.equal(ctx.scrollSpeedText(2), '0.3125 · Mac default');
+  assert.equal(ctx.scrollSpeedText(1), '0.125');
+  ctx.focusSection = 'scroll-speed';
+  ctx.moveCursorH(-1);
+  assert.deepEqual(ctx.pendingActions[0].value, {profile: 'imported',
+    imported: {file: 'mac.json', sha256: 'd'.repeat(64), scroll_speed: 0.125}}, 'a speed change converts the file again');
+  const local = ctx.devices[0].settings.imported_scroll;
+  assert.equal(local.scroll_speed, 0.125);
+  assert.deepEqual(local.speeds, converted.speeds, 'the stops stay while the conversion runs');
+  assert.equal(local.devices, undefined, "the old speed's curve is not kept for the new one");
+  assert.equal(ctx.scrollSpeedStop(), 1);
+  ctx.setScrollSpeedStop(1);
+  assert.equal(ctx.pendingActions.length, 1, 'the applied stop is not sent again');
+  ctx.setScrollSpeedStop(99);
+  assert.equal(ctx.pendingActions[1].value.imported.scroll_speed, 3, 'stops are clamped');
+  ctx.restoreScrollFeel();
+  assert.equal(ctx.pendingActions[2].value.imported.scroll_speed, 0.125, 'undo returns to the previous speed');
+}
+
 {
   const Scroll = require('./Scroll.js');
   const row = {file: 'mac.json', sha256: 'c'.repeat(64), name: 'Mac',

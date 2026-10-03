@@ -51,6 +51,8 @@ Panel {
   property bool scrollDrift: false
   property bool scrollInactive: false
   property bool editingScrollFeel: false
+  // The Scrolling speed stop shown while its slider is dragged; -1 when idle.
+  property int draggedScrollStop: -1
   property bool deviceSettingsOpen: false
   property bool gestureCanEdit: false
   property bool gestureCanRestore: false
@@ -163,8 +165,19 @@ Panel {
           devices[i].previous_scroll_feel = Scroll.fromSettings(settings)
           devices[i].imported_scroll_drift = false
           if (value.profile === "imported") {
+            var next = Scroll.copy(value.imported)
+            var old = settings.imported_scroll
+            if (!next.devices && old && old.file === next.file && old.sha256 === next.sha256) {
+              // Keep the speed stops until the backend's conversion arrives, but not the
+              // converted curve: it belongs to the old speed.
+              var merged = Scroll.copy(old)
+              delete merged.devices
+              delete merged.model
+              for (var key in next) merged[key] = next[key]
+              next = merged
+            }
             settings.scroll_preset = "imported"
-            settings.imported_scroll = Scroll.copy(value.imported)
+            settings.imported_scroll = next
           } else {
             delete settings.scroll_preset
             delete settings.imported_scroll
@@ -273,7 +286,8 @@ Panel {
     if (deviceSettingsOpen) sections.push("enable")
     sections.push("tabs")
     if (activeTab === "scrolling")
-      return sections.concat(["scroll-feel"], scrollFeel.profile === "linear" ? ["scroll"] : [], ["natural"])
+      return sections.concat(["scroll-feel"], scrollFeel.profile === "linear" ? ["scroll"]
+        : scrollSpeedStops().length ? ["scroll-speed"] : [], ["natural"])
     if (activeTab === "gestures") return sections
     if (!Curve.usesCurve(pointerFeel.profile)) sections.push("pointer")
     return sections.concat(["acceleration", "tap", "typing", "clickfinger"])
@@ -334,6 +348,8 @@ Panel {
       changeTab(tabs[Math.max(0, Math.min(2, tabs.indexOf(activeTab) + delta))])
     } else if (focusSection === "scroll") {
       adjustScrollFactor(delta > 0 ? 0.01 : -0.01)
+    } else if (focusSection === "scroll-speed") {
+      setScrollSpeedStop(scrollSpeedStop() + (delta > 0 ? 1 : -1))
     } else if (focusSection === "pointer") {
       adjustPointerSpeed(delta > 0 ? 0.1 : -0.1)
     }
@@ -471,6 +487,38 @@ Panel {
     previousScrollFeels = previous
     enqueue("scroll_feel", value)
     loadSelection()
+  }
+
+  // macOS Scrolling speed: Apple's stops plus the Mac's own setting, stored with the scrolling.
+  function scrollSpeedStops() {
+    return scrollFeel.profile === "imported" && scrollFeel.imported && scrollFeel.imported.speeds
+      ? scrollFeel.imported.speeds : []
+  }
+
+  function scrollSpeedStop() {
+    var stops = scrollSpeedStops()
+    var speed = scrollFeel.imported ? scrollFeel.imported.scroll_speed : 0
+    var best = 0
+    for (var i = 1; i < stops.length; i++)
+      if (Math.abs(stops[i] - speed) < Math.abs(stops[best] - speed)) best = i
+    return best
+  }
+
+  function scrollSpeedText(index) {
+    var stops = scrollSpeedStops()
+    if (!stops.length) return ""
+    var speed = stops[Math.max(0, Math.min(stops.length - 1, index))]
+    return Number(speed.toFixed(4)) + (Math.abs(speed - scrollFeel.imported.mac_speed) < 1e-9 ? " · Mac default" : "")
+  }
+
+  function setScrollSpeedStop(index) {
+    var stops = scrollSpeedStops()
+    if (!stops.length || !touchpadEnabled) return
+    var speed = stops[Math.max(0, Math.min(stops.length - 1, Math.round(index)))]
+    var imported = scrollFeel.imported
+    if (Math.abs(speed - imported.scroll_speed) < 1e-9) return
+    applyScrollFeel({ profile: "imported", imported: { file: imported.file, sha256: imported.sha256,
+      name: imported.name, scroll_speed: speed } })
   }
 
   function restoreScrollFeel() {
@@ -1073,6 +1121,78 @@ Panel {
               cursorShape: Qt.PointingHandCursor
               onContainsMouseChanged: if (containsMouse) { root.cursorActive = true; root.focusSection = "scroll-feel" }
               onClicked: root.openScrollFeelEditor()
+            }
+          }
+
+          // ========== macOS Scrolling speed ==========
+          SettingRow {
+            sectionName: "scroll-speed"
+            visible: root.activeTab === "scrolling" && root.scrollSpeedStops().length > 0
+            width: parent.width
+            implicitHeight: macSpeedContent.implicitHeight + Style.space(28)
+            Column {
+              id: macSpeedContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.space(10)
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(8)
+              opacity: root.touchpadEnabled ? 1.0 : 0.4
+
+              Item {
+                width: parent.width
+                implicitHeight: macSpeedLabel.implicitHeight
+                Text {
+                  id: macSpeedLabel
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Scrolling Speed"
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                Text {
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.scrollSpeedText(root.draggedScrollStop >= 0 ? root.draggedScrollStop : root.scrollSpeedStop())
+                  color: Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              CursorSurface {
+                width: parent.width
+                height: macSpeedSlider.implicitHeight + Style.spacing.controlGap
+                hasCursor: false
+                foreground: root.bar.foreground
+                outline: true
+                PanelSlider {
+                  id: macSpeedSlider
+                  bar: root.bar
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(6)
+                  anchors.rightMargin: Style.space(6)
+                  minimum: 0
+                  maximum: Math.max(1, root.scrollSpeedStops().length - 1)
+                  step: 1
+                  integer: true
+                  tickCount: root.scrollSpeedStops().length
+                  value: root.scrollSpeedStop()
+                  onMoved: function(v) { root.draggedScrollStop = Math.round(v) }
+                  onReleased: function(v) {
+                    root.draggedScrollStop = -1
+                    root.setScrollSpeedStop(v)
+                  }
+                }
+                HoverHandler {
+                  onHoveredChanged: if (hovered) {
+                    root.cursorActive = true
+                    root.focusSection = "scroll-speed"
+                  }
+                }
+              }
             }
           }
 
