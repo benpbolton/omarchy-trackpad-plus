@@ -17,6 +17,7 @@ import stat
 import time
 
 import pointer_profiles
+import scroll_profiles
 
 STATE_ROOT = Path(os.environ.get('XDG_STATE_HOME') or Path.home().resolve() / '.local/state')
 DIRECTORY = STATE_ROOT / 'omarchy/local-touchpads'
@@ -24,7 +25,7 @@ STATE = DIRECTORY / 'settings.json'
 GENERATED = STATE_ROOT / 'omarchy/toggles/hypr/zz-local-touchpads.lua'
 PROFILES = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'trackpad-plus/profiles'
 MACHINE_MODEL = Path('/sys/firmware/devicetree/base/model')
-SCHEMA = 5
+SCHEMA = 6
 BOOLS = {'enabled', 'natural_scroll', 'tap_to_click', 'disable_while_typing', 'clickfinger_behavior'}
 RANGES = {'sensitivity': (-1, 1), 'scroll_factor': (0.001, 10), 'scroll_scale': (0.1, 10)}
 DEFAULT_CURVE = {'precision': 0.3, 'start': 0.8, 'end': 2.8, 'fast': 1.6}
@@ -41,8 +42,11 @@ KNOWN_RESOLUTIONS = {
     ('apple-spi-trackpad', 'Apple MacBook Pro (14-inch, M1 Max, 2021)'): 12312 / 124.8,
 }
 # Settings stored for the editor or conversion; they are never emitted as Hyprland options.
-METADATA = {'curve', 'curve_preset', 'scroll_scale', 'imported_curve', 'units_per_mm'}
+METADATA = {'curve', 'curve_preset', 'scroll_scale', 'imported_curve', 'units_per_mm', 'scroll_preset', 'imported_scroll'}
 IMPORTED_KEYS = {'name', 'file', 'sha256', 'tracking_speed', 'mm_per_point', 'px_per_point', 'devices'}
+# macOS scrolling keeps the model behind its libinput points, for the compositor plugin.
+IMPORTED_SCROLL_KEYS = {'name', 'file', 'sha256', 'scroll_speed', 'mm_per_point', 'px_per_point', 'devices', 'model'}
+SCROLL_MODEL_KEYS = {'curve', 'resolution', 'report_rate_hz', 'driver'}
 PROFILE_FILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._ ,+-]{0,123}\.json')
 MAX_PROFILES = 32
 
@@ -110,8 +114,11 @@ def hypr(*args):
             process.wait()
 
 
-def validate_native_profile(profile):
+def validate_native_profile(profile, scroll=None):
     """Check libinput itself: Hyprland 0.56 ignores set_points' error status.
+
+    `profile` is the motion curve ("custom <step> <points>"); `scroll` is an optional
+    scroll_points string ("<step> <points>"), otherwise the identity scroll curve.
 
     This creates a configuration object only; it does not open input devices or
     require elevated permissions. In particular, libinput rejects >64 points.
@@ -131,7 +138,8 @@ def validate_native_profile(profile):
         fields = profile.split()
         step = float(fields[1])
         values = list(map(float, fields[2:]))
-        for motion_type, spacing, points in [(1, step, values), (2, 1.0, [0.0, 1.0])]:
+        scroll_fields = list(map(float, scroll.split())) if scroll else [1.0, 0.0, 1.0]
+        for motion_type, spacing, points in [(1, step, values), (2, scroll_fields[0], scroll_fields[1:])]:
             native_points = (ctypes.c_double * len(points))(*points)
             status = lib.libinput_config_accel_set_points(config, motion_type, spacing, len(points), native_points)
             if status != 0:
@@ -149,34 +157,70 @@ def imported_profile(device):
     return f"custom {device['step']:.4f} " + ' '.join(f'{point:.6f}' for point in device['points'])
 
 
-def validate_imported(value):
-    """A macOS profile converted for this group's interfaces: bounded literals only."""
-    if not isinstance(value, dict) or set(value) != IMPORTED_KEYS:
-        raise ValueError('Invalid imported pointer profile')
-    pointer_profiles.text(value['name'], 80)
+def imported_scroll_points(device):
+    """The native scroll_points string for one interface of converted macOS scrolling."""
+    return f"{device['step']:.4f} " + ' '.join(f'{point:.6f}' for point in device['points'])
+
+
+def validate_reference(value):
+    """A profile file name and digest, as previewed in the panel."""
     if not isinstance(value['file'], str) or not PROFILE_FILE.fullmatch(value['file']):
         raise ValueError('Invalid pointer profile file name')
     if not isinstance(value['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', value['sha256']):
         raise ValueError('Invalid pointer profile digest')
-    pointer_profiles.number(value['tracking_speed'], 0, 3)
+
+
+def validate_converted(value, keys, kind):
+    """Shared fields of a converted macOS profile: bounded literals only."""
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ValueError(f'Invalid imported {kind} profile')
+    pointer_profiles.text(value['name'], 80)
+    validate_reference(value)
     pointer_profiles.number(value['mm_per_point'], 0.01, 10)
     pointer_profiles.number(value['px_per_point'], 0.01, 100)
     devices = value['devices']
     if not isinstance(devices, dict) or not 1 <= len(devices) <= 32:
-        raise ValueError('Invalid imported pointer profile devices')
+        raise ValueError(f'Invalid imported {kind} profile devices')
     for name, device in devices.items():
         validate_name(name)
         if not isinstance(device, dict) or set(device) != {'units_per_mm', 'step', 'points'}:
-            raise ValueError('Invalid imported pointer curve')
+            raise ValueError(f'Invalid imported {kind} curve')
         pointer_profiles.number(device['units_per_mm'], 1, 10000)
         pointer_profiles.number(device['step'], 0.0001, 10000)
         points = device['points']
         if not isinstance(points, list) or not 2 <= len(points) <= 64:
-            raise ValueError('Imported pointer curves need 2 to 64 points')
+            raise ValueError(f'Imported {kind} curves need 2 to 64 points')
         for point in points:
             pointer_profiles.number(point, 0, 10000)
         if points != sorted(points):
-            raise ValueError('Imported pointer curves must not slow down as speed rises')
+            raise ValueError(f'Imported {kind} curves must not slow down as speed rises')
+    return value
+
+
+def validate_imported(value):
+    """A macOS profile converted for this group's interfaces: bounded literals only."""
+    validate_converted(value, IMPORTED_KEYS, 'pointer')
+    pointer_profiles.number(value['tracking_speed'], 0, 3)
+    return value
+
+
+def validate_imported_scroll(value):
+    """macOS scrolling converted for this group's interfaces, and the model it came from."""
+    validate_converted(value, IMPORTED_SCROLL_KEYS, 'scroll')
+    pointer_profiles.number(value['scroll_speed'], 0, 10)
+    model = value['model']
+    if not isinstance(model, dict) or set(model) != SCROLL_MODEL_KEYS \
+            or not isinstance(model['curve'], dict) or set(model['curve']) != set(pointer_profiles.CURVE_KEYS):
+        raise ValueError('Invalid imported scroll model')
+    for number in model['curve'].values():
+        pointer_profiles.number(number, 0, 1000)
+    pointer_profiles.number(model['resolution'], 0.0001, 20000)
+    pointer_profiles.number(model['report_rate_hz'], 0.0001, 1000)
+    driver = model['driver']
+    if not isinstance(driver, dict) or set(driver) != set(pointer_profiles.SCROLL_DRIVER_RANGES):
+        raise ValueError('Invalid imported scroll model')
+    for key, (low, high) in pointer_profiles.SCROLL_DRIVER_RANGES.items():
+        pointer_profiles.number(driver[key], low, high)
     return value
 
 
@@ -194,10 +238,15 @@ def validate_native_settings(settings):
     if settings.get('accel_profile') != 'custom':
         return
     if settings.get('curve_preset') == 'imported':
-        for device in settings['imported_curve']['devices'].values():
-            validate_native_profile(imported_profile(device))
+        motions = [imported_profile(device) for device in settings['imported_curve']['devices'].values()]
+        for motion in motions:
+            validate_native_profile(motion)
     else:
         validate_native_curve(settings.get('curve', DEFAULT_CURVE))
+        motions = [curve_profile(settings.get('curve', DEFAULT_CURVE))]
+    if settings.get('scroll_preset') == 'imported':
+        for device in settings['imported_scroll']['devices'].values():
+            validate_native_profile(motions[0], imported_scroll_points(device))
 
 
 def validate_name(name):
@@ -220,6 +269,11 @@ def validate_setting(key, value):
             raise ValueError('Unknown curve preset')
     elif key == 'imported_curve':
         validate_imported(value)
+    elif key == 'scroll_preset':
+        if value not in ('linear', 'imported'):
+            raise ValueError('Unknown scroll feel')
+    elif key == 'imported_scroll':
+        validate_imported_scroll(value)
     elif key == 'units_per_mm':
         validate_units(value)
     elif key in BOOLS:
@@ -264,8 +318,9 @@ def lua_for(groups):
             continue
         settings = group['settings']
         # A macOS profile is converted per interface: each has its own resolution.
-        imported = settings.get('imported_curve') \
-            if settings.get('curve_preset') == 'imported' and settings.get('accel_profile') == 'custom' else None
+        imported = settings.get('imported_curve') if imported_active(settings) else None
+        # macOS scrolling replaces the identity scroll curve and the scroll factor per interface.
+        scrolling = settings.get('imported_scroll') if imported_scroll_active(settings) else None
         fields = []
         for key, value in sorted(settings.items()):
             validate_setting(key, value)
@@ -275,16 +330,25 @@ def lua_for(groups):
                 if imported:
                     continue
                 value = curve_profile(settings.get('curve', DEFAULT_CURVE))
+            if key == 'scroll_factor' and scrolling:
+                continue
             fields.append(f'{key} = {json.dumps(value)}')
-        if settings.get('accel_profile') == 'custom':
-            # Explicit identity scrolling, independent of the pointer curve.
-            fields.append('scroll_points = "1 0 1"')
         for name in group['names']:
             validate_name(name)
-            # An interface attached after the profile was applied keeps its own acceleration.
+            # An interface attached after a profile was applied keeps its own acceleration.
             own = [f'accel_profile = {json.dumps(imported_profile(imported["devices"][name]))}'] \
                 if imported and name in imported['devices'] else []
-            lines.append('hl.device({ name = ' + json.dumps(name) + ', ' + ', '.join(own + fields) + ' })')
+            if scrolling and name in scrolling['devices']:
+                tail = [f'scroll_points = {json.dumps(imported_scroll_points(scrolling["devices"][name]))}',
+                        'scroll_factor = 1.0']  # the curve already produces final pixels
+            elif settings.get('accel_profile') == 'custom':
+                # Explicit identity scrolling, independent of the pointer curve.
+                tail = ['scroll_points = "1 0 1"']
+                if scrolling:
+                    tail.append(f'scroll_factor = {json.dumps(settings["scroll_factor"])}')
+            else:
+                tail = []
+            lines.append('hl.device({ name = ' + json.dumps(name) + ', ' + ', '.join(own + fields + tail) + ' })')
     return '\n'.join(lines + ['end']) + '\n'
 
 
@@ -476,6 +540,43 @@ def import_profile(group, reference, monitor=None):
         'px_per_point': round(scale, 6), 'devices': devices})
 
 
+def import_scroll(group, reference, monitor=None):
+    """Convert a previewed profile's measured scrolling for every interface in the group."""
+    raw = read_profile(reference['file'])
+    if pointer_profiles.digest(raw) != reference['sha256']:
+        raise ValueError('The pointer profile changed after it was previewed; choose it again')
+    profile = pointer_profiles.load_profile(raw)
+    scroll = profile.get('scroll')
+    if not scroll or not scroll['driver']:
+        raise ValueError(f"{reference['file']} has no measured scrolling; run the scroll check on its Mac "
+                         '(see tools/macos/README.md)')
+    if 'scroll_speed' in reference:
+        # The macOS Scrolling speed slider: Apple interpolates its own curves for any value.
+        scroll = dict(scroll, speed=reference['scroll_speed'])
+        profile = dict(profile, scroll=scroll)
+    millimetres = pointer_profiles.mm_per_point(profile)
+    scale = profile_scale(millimetres, monitor or panel_monitor())
+    model = machine_model()
+    devices, missing = {}, []
+    for name in group['names']:
+        units, _ = interface_units(group, name, model)
+        if units is None:
+            missing.append(name)
+            continue
+        result = scroll_profiles.convert(profile, units, scale)
+        devices[name] = {'units_per_mm': units, 'step': result['step'], 'points': result['points']}
+    if missing:
+        raise ValueError('Trackpad resolution is unknown for ' + ', '.join(missing)
+                         + '; set its units_per_mm (see tools/macos/README.md)')
+    return validate_imported_scroll({
+        'name': profile['name'], 'file': reference['file'], 'sha256': reference['sha256'],
+        'scroll_speed': scroll['speed'], 'mm_per_point': round(millimetres, 6), 'px_per_point': round(scale, 6),
+        'devices': devices,
+        'model': {'curve': pointer_profiles.curve_parameters(scroll['curves'], scroll['speed']),
+                  'resolution': scroll['resolution'], 'report_rate_hz': scroll['report_rate_hz'],
+                  'driver': {key: scroll['driver'][key] for key in pointer_profiles.SCROLL_DRIVER_RANGES}}})
+
+
 def list_profiles(group):
     """Profiles in the profiles directory; each must convert for this group's first known interface."""
     model = machine_model()
@@ -502,6 +603,16 @@ def list_profiles(group):
             row.update(name=profile['name'], sha256=pointer_profiles.digest(raw),
                        tracking_speed=profile['tracking_speed'],
                        speeds=[curve['index'] / pointer_profiles.FIXED for curve in profile['curves']])
+            scroll = profile.get('scroll')
+            if scroll:
+                row['scroll'] = {'speed': scroll['speed'], 'measured': bool(scroll['driver']),
+                                 'speeds': [curve['index'] / pointer_profiles.FIXED for curve in scroll['curves']]}
+                if scroll['driver'] and primary and 'error' not in monitor:
+                    try:
+                        scroll_profiles.convert(profile, interfaces[primary]['units_per_mm'],
+                                                profile_scale(pointer_profiles.mm_per_point(profile), monitor))
+                    except ValueError as exc:
+                        row['scroll']['error'] = str(exc)[:200]
         except (ValueError, OSError, UnicodeDecodeError) as exc:
             row['error'] = str(exc)[:200]
         rows.append(row)
@@ -571,7 +682,8 @@ def validate_state(state):
     all_names = set()
     for key, group in devices.items():
         validate_name(key)
-        if not isinstance(group, dict) or set(group) - {'id', 'label', 'names', 'settings', 'previous_pointer_feel', 'configured'}:
+        if not isinstance(group, dict) or set(group) - {'id', 'label', 'names', 'settings', 'previous_pointer_feel',
+                                                         'previous_scroll_feel', 'configured'}:
             raise ValueError('Invalid trackpad group')
         if group.get('id') != key or not isinstance(group.get('label'), str) or not 1 <= len(group['label']) <= 128:
             raise ValueError('Invalid trackpad identity')
@@ -592,16 +704,36 @@ def validate_state(state):
             validate_setting(option, value)
         if (settings.get('curve_preset') == 'imported') != ('imported_curve' in settings):
             raise ValueError('An imported pointer profile needs its converted curve')
+        if (settings.get('scroll_preset') == 'imported') != ('imported_scroll' in settings):
+            raise ValueError('macOS scrolling needs its converted curve')
         scale = settings.get('scroll_scale', max(1, settings['scroll_factor']))
         normalized = settings['scroll_factor'] / scale
         if not 0.01 - 1e-9 <= normalized <= 1 + 1e-9:
             raise ValueError('Scroll speed must be between 0.01 and 1.00 of the device scale')
         if 'previous_pointer_feel' in group:
             validate_change('pointer_feel', group['previous_pointer_feel'])
+        if 'previous_scroll_feel' in group:
+            validate_change('scroll_feel', group['previous_scroll_feel'])
     return state
 
 
 def validate_change(option, value):
+    if option == 'scroll_feel':
+        imported = isinstance(value, dict) and value.get('profile') == 'imported'
+        if not isinstance(value, dict) or set(value) != ({'profile', 'imported'} if imported else {'profile'}) \
+                or value['profile'] not in ('linear', 'imported'):
+            raise ValueError('Expected a scroll feel')
+        if imported:
+            reference = value['imported']
+            # Applying names a previewed file and optionally a scrolling speed; undo carries the
+            # converted scrolling itself.
+            if isinstance(reference, dict) and set(reference) in ({'file', 'sha256'}, {'file', 'sha256', 'scroll_speed'}):
+                validate_reference(reference)
+                if 'scroll_speed' in reference:
+                    pointer_profiles.number(reference['scroll_speed'], 0, 10)
+            else:
+                validate_imported_scroll(reference)
+        return
     if option != 'pointer_feel':
         validate_setting(option, value)
         return
@@ -616,9 +748,7 @@ def validate_change(option, value):
         # Applying names a previewed file and optionally a tracking speed; undo carries the
         # converted curve itself.
         if isinstance(reference, dict) and set(reference) in ({'file', 'sha256'}, {'file', 'sha256', 'tracking_speed'}):
-            if not isinstance(reference['file'], str) or not PROFILE_FILE.fullmatch(reference['file']) \
-                    or not isinstance(reference['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', reference['sha256']):
-                raise ValueError('Invalid pointer profile reference')
+            validate_reference(reference)
             if 'tracking_speed' in reference:
                 pointer_profiles.number(reference['tracking_speed'], 0, 3)
         else:
@@ -749,20 +879,29 @@ def imported_active(settings):
     return settings.get('curve_preset') == 'imported' and settings.get('accel_profile') == 'custom'
 
 
+def imported_scroll_active(settings):
+    """libinput applies scroll_points only with the custom acceleration profile."""
+    return settings.get('scroll_preset') == 'imported' and settings.get('accel_profile') == 'custom'
+
+
 def snapshot(state, live, monitor=None):
     rows = []
     for key in sorted(state['devices'], key=lambda k: (k != 'apple', k != 'dell', k)):
         group = copy.deepcopy(state['devices'][key])
         group['connected'] = key in live
         settings = group['settings']
-        if monitor and imported_active(settings):
-            # The curve was converted for one Hyprland scale; a new scale needs a fresh Apply.
-            imported = settings['imported_curve']
-            try:
-                current = profile_scale(imported['mm_per_point'], monitor)
-                group['imported_drift'] = abs(current / imported['px_per_point'] - 1) > 0.01
-            except ValueError:
-                pass  # An incomplete monitor report says nothing about drift.
+        # Curves were converted for one Hyprland scale; a new scale needs a fresh Apply.
+        for active, name, flag in ((imported_active, 'imported_curve', 'imported_drift'),
+                                   (imported_scroll_active, 'imported_scroll', 'imported_scroll_drift')):
+            if monitor and active(settings):
+                imported = settings[name]
+                try:
+                    current = profile_scale(imported['mm_per_point'], monitor)
+                    group[flag] = abs(current / imported['px_per_point'] - 1) > 0.01
+                except ValueError:
+                    pass  # An incomplete monitor report says nothing about drift.
+        if settings.get('scroll_preset') == 'imported' and not imported_scroll_active(settings):
+            group['imported_scroll_inactive'] = True  # System or Flat pointer feel has no scroll curve
         rows.append(group)
     return {'devices': rows}
 
@@ -794,7 +933,7 @@ def migrate(state):
                                                'end': 2 * old['transition'], 'fast': old['fast']})
             if previous['profile'] == 'mac':
                 previous['profile'] = 'custom'
-    updated['version'] = SCHEMA  # 5 adds imported macOS profiles; older data is unchanged.
+    updated['version'] = SCHEMA  # 5 adds macOS pointer profiles and 6 macOS scrolling; older data is unchanged.
     validate_state(updated)
     devices = updated['devices']
     legacy = [key for key in LEGACY_APPLE if key in devices
@@ -844,6 +983,22 @@ def change(state, key, option, value):
         settings['accel_profile'] = 'custom' if profile in ('mac', 'custom', 'imported') else profile
         settings['curve'] = dict(curve)  # The editor sizes new presets to the device range.
         settings['curve_preset'] = profile if profile in ('mac', 'imported') else 'custom'
+    elif option == 'scroll_feel':
+        validate_change(option, value)
+        group = updated['devices'][key]
+        if value['profile'] == 'imported' and settings.get('accel_profile') != 'custom':
+            raise ValueError('macOS scrolling needs Pointer feel set to macOS or Custom')
+        previous = {'profile': settings.get('scroll_preset', 'linear')}
+        if previous['profile'] == 'imported':
+            previous['imported'] = copy.deepcopy(settings['imported_scroll'])
+        group['previous_scroll_feel'] = previous
+        settings.pop('imported_scroll', None)
+        settings.pop('scroll_preset', None)
+        if value['profile'] == 'imported':
+            imported = value['imported']
+            # A file reference is converted now; undo supplies the converted scrolling itself.
+            settings['imported_scroll'] = imported if 'devices' in imported else import_scroll(group, imported)
+            settings['scroll_preset'] = 'imported'
     else:
         validate_setting(option, value)
         if option == 'scroll_scale':
@@ -919,7 +1074,8 @@ def main():
         if command == 'set':
             state = change(state, sys.argv[2], sys.argv[3], value)
         monitor = None
-        if any(imported_active(group['settings']) for group in state['devices'].values()):
+        if any(imported_active(group['settings']) or imported_scroll_active(group['settings'])
+               for group in state['devices'].values()):
             try:
                 monitor = panel_monitor()
             except (ValueError, RuntimeError, subprocess.TimeoutExpired):

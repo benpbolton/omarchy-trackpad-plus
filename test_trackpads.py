@@ -279,7 +279,7 @@ class TrackpadTests(unittest.TestCase):
         self.assertEqual(m.read_state_file(m.STATE), 'safe')
 
     def test_future_and_malformed_state_is_rejected(self):
-        for state in [dict(self.state, version=6), dict(self.state, version=True),
+        for state in [dict(self.state, version=m.SCHEMA + 1), dict(self.state, version=True),
                       dict(self.state, extra='unsupported')]:
             with self.assertRaises(ValueError):
                 m.migrate(state)
@@ -451,7 +451,7 @@ class TrackpadTests(unittest.TestCase):
 
     def test_acceleration_migration_preserves_existing_settings(self):
         migrated = m.migrate(self.state)
-        self.assertEqual(migrated['version'], 5)
+        self.assertEqual(migrated['version'], m.SCHEMA)
         for key in self.groups:
             settings = dict(migrated['devices'][key]['settings'])
             self.assertEqual(settings.pop('accel_profile'), 'adaptive')
@@ -831,6 +831,167 @@ class TrackpadTests(unittest.TestCase):
         lua = m.lua_for({'apple': state['devices']['apple']})
         self.assertIn('accel_profile = "flat"', lua)
         self.assertNotIn('custom', lua)
+
+    def scroll_state(self, **reference):
+        """The macOS pointer state with the profile's measured scrolling applied too."""
+        state = self.imported_state()
+        with patch.object(m, 'hypr', side_effect=self.compositor), patch.object(m, 'save'), NATIVE():
+            return m.change(state, 'apple', 'scroll_feel',
+                            {'profile': 'imported', 'imported': dict(self.reference(), **reference)})
+
+    def test_macos_scrolling_is_converted_per_interface_and_emitted(self):
+        state = self.scroll_state()
+        group = state['devices']['apple']
+        settings = group['settings']
+        scrolling = settings['imported_scroll']
+        self.assertEqual(settings['scroll_preset'], 'imported')
+        self.assertEqual(scrolling['scroll_speed'], 0.3125)  # the Mac's own setting by default
+        self.assertEqual(scrolling['px_per_point'], settings['imported_curve']['px_per_point'])
+        self.assertEqual(set(scrolling['devices']), {'apple-inc.-magic-trackpad', 'apple-inc.-magic-trackpad-1'})
+        device = scrolling['devices']['apple-inc.-magic-trackpad']
+        profile = m.pointer_profiles.load_profile(MAC_PROFILE.read_bytes())
+        scale = m.profile_scale(m.pointer_profiles.mm_per_point(profile), PANEL[0])
+        expected = m.scroll_profiles.convert(profile, 47.6, scale)
+        self.assertEqual(device['points'], expected['points'])
+        model = scrolling['model']
+        self.assertEqual(model['driver']['units_per_mm'], profile['scroll']['driver']['units_per_mm'])
+        self.assertNotIn('verified', model['driver'])
+        self.assertAlmostEqual(model['curve']['index'], 0.3125)
+        lua = m.lua_for({'apple': group})
+        for name in scrolling['devices']:
+            line = next(line for line in lua.splitlines() if json.dumps(name) in line)
+            self.assertIn(f'scroll_points = "{device["step"]:.4f} 0.000000 ', line)
+            self.assertIn('scroll_factor = 1.0', line)
+            self.assertNotIn('"1 0 1"', line)
+            self.assertNotIn('scroll_factor = 0.2', line)
+            self.assertIn('natural_scroll = false', line)  # natural scrolling stays the user's choice
+        self.assertNotIn('imported_scroll', lua)
+        self.assertEqual(group['previous_scroll_feel'], {'profile': 'linear'})
+        self.assertEqual(settings['scroll_factor'], 0.2)  # kept for Linear
+        self.assertEqual(m.migrate(state), state)
+
+    def test_scrolling_speed_selects_apples_scroll_curve(self):
+        default = self.scroll_state()['devices']['apple']['settings']['imported_scroll']
+        faster = self.scroll_state(scroll_speed=1.5)['devices']['apple']['settings']['imported_scroll']
+        self.assertEqual(faster['scroll_speed'], 1.5)
+        self.assertAlmostEqual(faster['model']['curve']['index'], 1.5)
+        name = 'apple-inc.-magic-trackpad'
+        self.assertGreater(faster['devices'][name]['points'][-1], default['devices'][name]['points'][-1])
+        for bad in (10.5, -0.1, True, '1'):
+            with self.assertRaises(ValueError):
+                m.validate_change('scroll_feel', {'profile': 'imported', 'imported': dict(self.reference(), scroll_speed=bad)})
+
+    def test_macos_scrolling_needs_a_custom_pointer_curve_and_measured_scrolling(self):
+        directory = self.profiles_dir()
+        state = m.migrate(self.state)
+        state['devices']['apple']['settings']['units_per_mm'] = {'apple-inc.-magic-trackpad': 47.6,
+                                                                 'apple-inc.-magic-trackpad-1': 47.6}
+        pointer_only = {key: value for key, value in json.loads(MAC_PROFILE.read_text()).items() if key != 'scroll'}
+        (directory / 'pointer-only.json').write_text(json.dumps(dict(pointer_only, version=1)))
+        unmeasured = json.loads(MAC_PROFILE.read_text())
+        unmeasured['scroll']['driver'] = None
+        (directory / 'unmeasured.json').write_text(json.dumps(unmeasured))
+        apply = lambda s, reference: m.change(s, 'apple', 'scroll_feel', {'profile': 'imported', 'imported': reference})
+        with patch.object(m, 'hypr', side_effect=self.compositor) as run, patch.object(m, 'save') as save, NATIVE():
+            with self.assertRaisesRegex(ValueError, 'needs Pointer feel'):
+                apply(state, self.reference())
+            state = m.change(state, 'apple', 'accel_profile', 'custom')
+            run.reset_mock(); save.reset_mock()
+            for name in ('pointer-only.json', 'unmeasured.json'):
+                with self.assertRaisesRegex(ValueError, 'no measured scrolling'):
+                    apply(state, self.reference(name))
+            with self.assertRaisesRegex(ValueError, 'changed after it was previewed'):
+                apply(state, dict(self.reference(), sha256='0' * 64))
+            self.assertFalse([call for call in run.call_args_list if call.args[0] == 'eval'])
+            save.assert_not_called()
+            # A Custom pointer curve is enough; the scroll curve is independent of it.
+            state = apply(state, self.reference())
+        settings = state['devices']['apple']['settings']
+        self.assertNotIn('imported_curve', settings)
+        self.assertEqual(settings['scroll_preset'], 'imported')
+
+    def test_restore_previous_scroll_feel_round_trips_without_the_file(self):
+        state = self.scroll_state()
+        original = copy.deepcopy(state['devices']['apple']['settings']['imported_scroll'])
+        with patch.object(m, 'hypr', side_effect=self.compositor), patch.object(m, 'save'), NATIVE():
+            state = m.change(state, 'apple', 'scroll_feel', {'profile': 'linear'})
+            settings = state['devices']['apple']['settings']
+            self.assertNotIn('imported_scroll', settings)
+            self.assertNotIn('scroll_preset', settings)
+            self.assertIn('scroll_points = "1 0 1"', m.lua_for({'apple': state['devices']['apple']}))
+            previous = state['devices']['apple']['previous_scroll_feel']
+            self.assertEqual(previous, {'profile': 'imported', 'imported': original})
+            (m.PROFILES / MAC_PROFILE.name).unlink()
+            state = m.change(state, 'apple', 'scroll_feel', previous)
+        self.assertEqual(state['devices']['apple']['settings']['imported_scroll'], original)
+        self.assertEqual(state['devices']['apple']['previous_scroll_feel'], {'profile': 'linear'})
+
+    def test_system_or_flat_pointer_feel_leaves_macos_scrolling_inactive(self):
+        state = self.scroll_state()
+        with patch.object(m, 'hypr', side_effect=self.compositor), patch.object(m, 'save'), NATIVE():
+            flat = m.change(state, 'apple', 'accel_profile', 'flat')
+        lua = m.lua_for({'apple': flat['devices']['apple']})
+        self.assertNotIn('scroll_points', lua)
+        self.assertIn('scroll_factor = 0.2', lua)
+        row = m.snapshot(flat, {}, PANEL[0])['devices'][0]
+        self.assertTrue(row['imported_scroll_inactive'])
+        self.assertNotIn('imported_scroll_drift', row)
+        self.assertNotIn('imported_scroll_inactive', m.snapshot(state, {}, PANEL[0])['devices'][0])
+
+    def test_interfaces_added_later_keep_linear_scrolling(self):
+        state = self.scroll_state()
+        group = copy.deepcopy(state['devices']['apple'])
+        group['names'].append('apple-inc.-magic-trackpad-2')
+        line = next(line for line in m.lua_for({'apple': group}).splitlines()
+                    if '"apple-inc.-magic-trackpad-2"' in line)
+        self.assertIn('scroll_points = "1 0 1"', line)
+        self.assertIn('scroll_factor = 0.2', line)
+        self.assertEqual(line.count('scroll_factor'), 1)
+
+    def test_imported_scroll_settings_are_validated_like_any_other(self):
+        state = self.scroll_state()
+        name = 'apple-inc.-magic-trackpad'
+        for mutate in [lambda s: s['imported_scroll']['devices'][name]['points'].reverse(),
+                       lambda s: s['imported_scroll']['devices'][name].update(step=0),
+                       lambda s: s['imported_scroll'].update(extra=1),
+                       lambda s: s['imported_scroll'].update(scroll_speed=11),
+                       lambda s: s['imported_scroll']['model']['driver'].update(units_per_mm=0),
+                       lambda s: s['imported_scroll']['model']['driver'].update(verified='x'),
+                       lambda s: s['imported_scroll']['model']['curve'].pop('linear'),
+                       lambda s: s.pop('imported_scroll'),
+                       lambda s: s.pop('scroll_preset'),
+                       lambda s: s.update(scroll_preset='other')]:
+            broken = copy.deepcopy(state)
+            mutate(broken['devices']['apple']['settings'])
+            with self.assertRaises(ValueError):
+                m.validate_state(broken)
+        broken = copy.deepcopy(state)
+        broken['devices']['apple']['previous_scroll_feel'] = {'profile': 'other'}
+        with self.assertRaises(ValueError):
+            m.validate_state(broken)
+
+    def test_native_validation_covers_the_scroll_curve(self):
+        state = self.scroll_state()
+        with patch.object(m, 'validate_native_profile') as native:
+            m.validate_native_settings(state['devices']['apple']['settings'])
+        scrolls = [call.args[1] for call in native.call_args_list if len(call.args) > 1]
+        self.assertEqual(len(scrolls), 2)
+        self.assertTrue(all(len(points.split()) == 65 for points in scrolls))
+
+    def test_profiles_listing_reports_scrolling(self):
+        self.profiles_dir()
+        state = m.migrate(self.state)
+        state['devices']['apple']['settings']['units_per_mm'] = {'apple-inc.-magic-trackpad': 47.6}
+        with patch.object(m, 'hypr', side_effect=self.compositor):
+            row = m.list_profiles(state['devices']['apple'])['profiles'][0]
+        self.assertEqual(row['scroll'], {'speed': 0.3125, 'measured': True,
+                                         'speeds': [0, 0.125, 0.5, 0.6875, 0.875, 1, 1.5, 2, 2.5, 3]})
+
+    def test_scroll_drift_is_reported_like_pointer_drift(self):
+        state = self.scroll_state()
+        moved = m.snapshot(state, {}, dict(PANEL[0], scale=1.6))['devices'][0]
+        self.assertTrue(moved['imported_scroll_drift'])
+        self.assertFalse(m.snapshot(state, {}, PANEL[0])['devices'][0]['imported_scroll_drift'])
 
     def test_display_scale_drift_is_reported_without_rewriting(self):
         state = self.imported_state()
