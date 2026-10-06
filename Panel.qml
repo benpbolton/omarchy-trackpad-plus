@@ -38,6 +38,10 @@ Panel {
   property bool pointerAcceleration: true
   property var pointerFeel: ({ profile: "adaptive", curve: Curve.defaults() })
   property var previousFeels: ({})
+  property bool scrollProgressive: false
+  property var scrollFeel: ({ profile: "mac", curve: Curve.scrollDefaults() })
+  property var previousScrollFeels: ({})
+  property string curveKind: "pointer"
   property bool editingCurve: false
   property bool deviceSettingsOpen: false
   property bool gestureCanEdit: false
@@ -131,6 +135,12 @@ Panel {
     if (row.previous_pointer_feel) previous[selectedDevice] = row.previous_pointer_feel
     else delete previous[selectedDevice]
     previousFeels = previous
+    scrollProgressive = v.scroll_progressive === true
+    scrollFeel = Curve.fromScrollSettings(v)
+    var previousScroll = Curve.copy(previousScrollFeels)
+    if (row.previous_scroll_feel) previousScroll[selectedDevice] = row.previous_scroll_feel
+    else delete previousScroll[selectedDevice]
+    previousScrollFeels = previousScroll
     scrollScale = v.scroll_scale || Math.max(1, v.scroll_factor)
     scrollFactor = v.scroll_factor / scrollScale
     pendingScrollFactor = scrollFactor
@@ -155,7 +165,7 @@ Panel {
     var queue = pendingActions.slice()
     // Replace only consecutive writes of the same scalar; preserve profile/undo ordering.
     var last = queue.length ? queue[queue.length - 1] : null
-    if (last && last.device === selectedDevice && last.option === option && option !== "pointer_feel" && option !== "pointer_restore") {
+    if (last && last.device === selectedDevice && last.option === option && option !== "pointer_feel" && option !== "scroll_feel" && option !== "pointer_restore") {
       queue.pop()
     }
     if (queue.length >= 128) {
@@ -177,6 +187,24 @@ Panel {
           settings.accel_profile = value.profile === "mac" || value.profile === "custom" ? "custom" : value.profile
           settings.curve = Curve.copy(value.curve)
           settings.curve_preset = value.profile === "mac" ? "mac" : "custom"
+          if (value.profile === "adaptive" || value.profile === "flat") settings.scroll_progressive = false
+        } else if (option === "scroll_feel") {
+          devices[i].previous_scroll_feel = Curve.fromScrollSettings(settings)
+          settings.scroll_progressive = true
+          settings.scroll_curve = Curve.copy(value.curve)
+          settings.scroll_curve_preset = value.profile === "mac" ? "mac" : "custom"
+          if (settings.accel_profile !== "custom") {
+            settings.accel_profile = "custom"
+            settings.curve = Curve.presetForScale(settings.scroll_scale || Math.max(1, settings.scroll_factor))
+            settings.curve_preset = "mac"
+          }
+        } else if (option === "scroll_progressive") {
+          settings.scroll_progressive = value
+          if (value && settings.accel_profile !== "custom") {
+            settings.accel_profile = "custom"
+            settings.curve = Curve.presetForScale(settings.scroll_scale || Math.max(1, settings.scroll_factor))
+            settings.curve_preset = "mac"
+          }
         } else if (option === "scroll_scale") {
           var oldScale = settings.scroll_scale || Math.max(1, settings.scroll_factor)
           settings.scroll_factor = Math.round(settings.scroll_factor * value / oldScale * 1000000) / 1000000
@@ -280,7 +308,11 @@ Panel {
     var sections = ["device", "device-settings"]
     if (deviceSettingsOpen) sections.push("enable")
     sections.push("tabs")
-    if (activeTab === "scrolling") return sections.concat(["scroll", "natural"])
+    if (activeTab === "scrolling") {
+      var extra = ["scroll", "progressive"]
+      if (scrollProgressive) extra.push("scroll-accel")
+      return sections.concat(extra.concat(["natural"]))
+    }
     if (activeTab === "gestures") return sections
     if (pointerFeel.profile !== "mac" && pointerFeel.profile !== "custom") sections.push("pointer")
     sections = sections.concat(["acceleration", "tap", "typing", "clickfinger"])
@@ -352,6 +384,8 @@ Panel {
     if (focusSection === "tabs" && activeTab === "gestures") { gestureEditor.beginEditing(); return }
     if (focusSection === "device-settings") { toggleDeviceSettings(selectedDevice); return }
     if (focusSection === "acceleration") { openCurveEditor(); return }
+    if (focusSection === "scroll-accel") { openScrollEditor(); return }
+    if (focusSection === "progressive") { toggleProgressiveScroll(); return }
     if (focusSection === "enable") { toggleTouchpad(); return }
     if (focusSection === "natural") { toggleNaturalScroll(); return }
     if (focusSection === "tap") { toggleTapToClick(); return }
@@ -416,11 +450,37 @@ Panel {
   function openCurveEditor() {
     if (!touchpadEnabled) return
     selectDevice(selectedDevice) // Flush any pending speed edits first.
+    curveKind = "pointer"
     editingCurve = true
     curveEditor.begin()
   }
 
+  function openScrollEditor() {
+    if (!touchpadEnabled) return
+    selectDevice(selectedDevice)
+    curveKind = "scroll"
+    editingCurve = true
+    curveEditor.begin()
+  }
+
+  function toggleProgressiveScroll() {
+    var next = !scrollProgressive
+    scrollProgressive = next
+    if (next && pointerFeel.profile !== "mac" && pointerFeel.profile !== "custom") {
+      pointerFeel = { profile: "mac", curve: Curve.presetForScale(scrollScale) }
+    }
+    enqueue("scroll_progressive", next)
+  }
+
   function applyPointerFeel(value, restoring) {
+    if (curveKind === "scroll") {
+      var previousScroll = Curve.copy(previousScrollFeels)
+      previousScroll[selectedDevice] = Curve.copy(scrollFeel)
+      previousScrollFeels = previousScroll
+      enqueue("scroll_feel", value)
+      loadSelection()
+      return
+    }
     var previous = Curve.copy(previousFeels)
     previous[selectedDevice] = Curve.copy(pointerFeel)
     previousFeels = previous
@@ -429,6 +489,13 @@ Panel {
   }
 
   function restorePointerFeel() {
+    if (curveKind === "scroll") {
+      if (!previousScrollFeels[selectedDevice]) return
+      var scrollValue = Curve.copy(previousScrollFeels[selectedDevice])
+      applyPointerFeel(scrollValue)
+      curveEditor.draft = Curve.copy(scrollValue)
+      return
+    }
     if (!previousFeels[selectedDevice]) return
     var value = Curve.copy(previousFeels[selectedDevice])
     applyPointerFeel(value, true)
@@ -696,12 +763,13 @@ Panel {
             accent: Color.accent
             fontFamily: root.bar.fontFamily
             uiScale: Style.space(100) / 100
-            saved: root.pointerFeel
+            saved: root.curveKind === "scroll" ? root.scrollFeel : root.pointerFeel
+            kind: root.curveKind
             gainMaximum: root.scrollScale
             deviceLabel: root.selectedLabel + " Trackpad"
             busy: actionProc.running || root.pendingActions.length > 0
             settingsError: root.settingsError
-            canRestore: !!root.previousFeels[root.selectedDevice]
+            canRestore: root.curveKind === "scroll" ? !!root.previousScrollFeels[root.selectedDevice] : !!root.previousFeels[root.selectedDevice]
             onApplyRequested: function(value) { root.applyPointerFeel(value) }
             onRestoreRequested: root.restorePointerFeel()
             onBackRequested: { root.editingCurve = false; keyCatcher.forceActiveFocus() }
@@ -898,7 +966,7 @@ Panel {
           Text {
             width: parent.width - Style.space(20)
             x: Style.space(10)
-            text: "Sets the scroll range and acceleration chart maximum. Use 1× for this trackpad or 3× for a wider range."
+            text: "Sets the scroll-speed range and pointer acceleration chart maximum. The scroll acceleration chart has its own 10× range."
             wrapMode: Text.WordWrap
             color: Qt.darker(root.bar.foreground, 1.4)
             font.family: root.bar.fontFamily
@@ -1295,6 +1363,53 @@ Panel {
               cursorShape: Qt.PointingHandCursor
               onContainsMouseChanged: if (containsMouse) { root.cursorActive = true; root.focusSection = "acceleration" }
               onClicked: root.openCurveEditor()
+            }
+          }
+
+          ToggleRow {
+            width: parent.width
+            label: "Progressive Scrolling"
+            description: "Slow swipes stay precise; faster flicks cover more distance, like macOS"
+            checked: root.scrollProgressive
+            sectionName: "progressive"
+            visible: root.activeTab === "scrolling"
+            enabled: root.touchpadEnabled
+            onToggled: root.toggleProgressiveScroll()
+          }
+
+          SettingRow {
+            sectionName: "scroll-accel"
+            visible: root.activeTab === "scrolling" && root.scrollProgressive
+            width: parent.width
+            height: Style.space(58)
+            foreground: root.bar.foreground
+            fill: root.hoverFill
+            opacity: root.touchpadEnabled ? 1.0 : 0.4
+            enabled: root.touchpadEnabled
+            Column {
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(3)
+              Text {
+                text: "Scroll acceleration  ›"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Text {
+                text: ({ mac: "Mac-inspired", custom: "Custom" })[root.scrollFeel.profile] + " · Slow vs flick response"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onContainsMouseChanged: if (containsMouse) { root.cursorActive = true; root.focusSection = "scroll-accel" }
+              onClicked: root.openScrollEditor()
             }
           }
 

@@ -772,6 +772,99 @@ class TrackpadTests(unittest.TestCase):
                 m.save(state)
             write.assert_not_called()
 
+    def test_progressive_scroll_default_is_independent_of_device_scale(self):
+        for scale, factor in [(0.1, 0.02), (1, 0.2), (3, 0.6), (10, 1)]:
+            with self.subTest(scale=scale):
+                state = m.migrate(self.state)
+                settings = state['devices']['apple']['settings']
+                settings.update(scroll_scale=scale, scroll_factor=factor)
+                with patch.object(m, 'hypr'), patch.object(m, 'save'):
+                    enabled = m.change(state, 'apple', 'scroll_progressive', True)
+                    changed = m.change(enabled, 'apple', 'scroll_scale', 2)
+                actual = enabled['devices']['apple']['settings']
+                self.assertEqual(actual['scroll_curve'], m.DEFAULT_SCROLL_CURVE)
+                self.assertEqual(actual['scroll_factor'], factor)
+                self.assertEqual(changed['devices']['apple']['settings']['scroll_curve'], m.DEFAULT_SCROLL_CURVE)
+                lua = m.lua_for({'apple': enabled['devices']['apple']})
+                self.assertIn('scroll_points = "' + m.scroll_profile(m.DEFAULT_SCROLL_CURVE), lua)
+
+    def test_progressive_scroll_keeps_custom_pointer_and_linear_default(self):
+        state = m.migrate(self.state)
+        self.assertFalse(state['devices']['apple']['settings'].get('scroll_progressive', False))
+        pointer = {'precision': 0.2, 'start': 0.6, 'end': 3, 'fast': 1.4}
+        with patch.object(m, 'hypr'), patch.object(m, 'save'):
+            custom = m.change(state, 'apple', 'pointer_feel', {'profile': 'custom', 'curve': pointer})
+            enabled = m.change(custom, 'apple', 'scroll_progressive', True)
+            disabled = m.change(enabled, 'apple', 'scroll_progressive', False)
+        for result in (enabled, disabled):
+            self.assertEqual(result['devices']['apple']['settings']['curve'], pointer)
+        self.assertEqual(disabled['devices']['apple']['settings']['scroll_curve'], m.DEFAULT_SCROLL_CURVE)
+        self.assertIn('scroll_points = "' + m.IDENTITY_SCROLL,
+                      m.lua_for({'apple': disabled['devices']['apple']}))
+
+    def test_progressive_scroll_emits_curve_not_identity(self):
+        state = m.migrate(self.state)
+        curve = dict(m.DEFAULT_SCROLL_CURVE)
+        with patch.object(m, 'hypr') as run, patch.object(m, 'save'):
+            updated = m.change(state, 'apple', 'scroll_feel', {'profile': 'mac', 'curve': curve})
+        settings = updated['devices']['apple']['settings']
+        self.assertTrue(settings['scroll_progressive'])
+        self.assertEqual(settings['accel_profile'], 'custom')
+        self.assertEqual(settings['scroll_curve_preset'], 'mac')
+        lua = run.call_args.args[1]
+        self.assertIn('scroll_points = "' + m.scroll_profile(curve), lua)
+        self.assertNotIn(f'scroll_points = "{m.IDENTITY_SCROLL}"', lua)
+        self.assertNotIn('scroll_progressive', lua)
+        self.assertNotIn('scroll_curve =', lua)
+        self.assertEqual(updated['devices']['dell'], state['devices']['dell'])
+
+    def test_progressive_toggle_switches_adaptive_pointer_to_mac(self):
+        state = m.migrate(self.state)
+        with patch.object(m, 'hypr') as run, patch.object(m, 'save'):
+            updated = m.change(state, 'apple', 'scroll_progressive', True)
+        settings = updated['devices']['apple']['settings']
+        self.assertTrue(settings['scroll_progressive'])
+        self.assertEqual(settings['accel_profile'], 'custom')
+        self.assertEqual(settings['curve_preset'], 'mac')
+        self.assertIn('scroll_points = "' + m.scroll_profile(settings['scroll_curve']), run.call_args.args[1])
+
+    def test_system_pointer_turns_off_progressive_scroll(self):
+        state = m.migrate(self.state)
+        with patch.object(m, 'hypr'), patch.object(m, 'save'):
+            enabled = m.change(state, 'apple', 'scroll_progressive', True)
+            updated = m.change(enabled, 'apple', 'pointer_feel',
+                               {'profile': 'adaptive', 'curve': m.DEFAULT_CURVE})
+        self.assertFalse(updated['devices']['apple']['settings']['scroll_progressive'])
+        lua = m.lua_for({'apple': updated['devices']['apple']})
+        self.assertIn('accel_profile = "adaptive"', lua)
+        self.assertNotIn('scroll_points', lua)
+
+    def test_scroll_defaults_match_curve_js(self):
+        script = "const c=require('./Curve.js'); console.log(JSON.stringify([c.scrollDefaults(), c.points(c.scrollDefaults())]))"
+        defaults, graph = json.loads(subprocess.check_output(
+            ['node', '-e', script], cwd=Path(__file__).parent))
+        self.assertEqual(defaults, m.DEFAULT_SCROLL_CURVE)
+        self.assertEqual(graph, list(map(float, m.scroll_profile(m.DEFAULT_SCROLL_CURVE).split()[1:])))
+
+    def test_calibrated_pointer_keeps_independent_progressive_scroll(self):
+        state = m.migrate(self.state)
+        group = state['devices']['apple']
+        group['curve_calibration'] = {name: 47 for name in group['names']}
+        group['settings'].update(accel_profile='custom', curve=dict(m.DEFAULT_CURVE),
+                                 scroll_progressive=True, scroll_curve=dict(m.DEFAULT_SCROLL_CURVE))
+        m.validate_persisted(state)
+        lua = m.lua_for({'apple': group})
+        self.assertIn('accel_profile = "' + m.curve_profile(m.DEFAULT_CURVE, 47) + '"', lua)
+        self.assertIn('scroll_points = "' + m.scroll_profile(m.DEFAULT_SCROLL_CURVE) + '"', lua)
+
+    def test_progressive_scroll_captures_calibration_for_new_custom_pointer(self):
+        state = m.migrate(self.state)
+        with patch.object(m, 'device_resolution', return_value=47):
+            m.enable_progressive_scroll(state['devices']['apple'])
+        group = state['devices']['apple']
+        self.assertEqual(group['curve_calibration'], {name: 47 for name in group['names']})
+        self.assertEqual(group['previous_pointer_feel']['calibration'], {})
+
     def test_reapplying_previous_curve_is_apply_not_undo(self):
         state = m.migrate(self.state)
         group = state['devices']['apple']

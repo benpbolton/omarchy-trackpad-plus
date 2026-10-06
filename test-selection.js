@@ -24,7 +24,10 @@ function context() {
       error: '', resetDraft() { this.dirty = false }, acceptSettings(value) { this.settings = value },
       beginEditing() { this.activeFocus = true } },
     Model: require('./Model.js'),
-    Curve: require('./Curve.js'), previousFeels: {}, curveEditor: {},
+    Curve: require('./Curve.js'), previousFeels: {}, previousScrollFeels: {},
+    curveKind: 'pointer', scrollProgressive: false,
+    scrollFeel: { profile: 'mac', curve: require('./Curve.js').scrollDefaults() },
+    curveEditor: {},
     keyCatcher: { forceActiveFocus() {} },
     scrollDebounce: { running: false, stop() { this.running = false; } },
     pointerDebounce: { running: false, stop() { this.running = false; } }
@@ -394,3 +397,19 @@ console.log('Passed: device selection, fine scroll steps, stale-read rejection, 
   assert.equal(ctx.palmEditor.settings.pending, true);
 }
 console.log('Palm panel action scoping and stale-response checks passed.');
+
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  ctx.curveKind = 'scroll';
+  const first = {profile: 'custom', curve: {precision: 0.8, start: 0.5, end: 2.2, fast: 1.7}};
+  const second = {profile: 'custom', curve: {precision: 1.2, start: 0.5, end: 2.2, fast: 2.8}};
+  ctx.applyPointerFeel(first);
+  ctx.applyPointerFeel(second);
+  assert.equal(ctx.pendingActions.length, 2, 'scroll Apply operations must preserve undo ordering');
+  assert.equal(JSON.stringify(ctx.previousScrollFeels.apple), JSON.stringify(first));
+  ctx.restorePointerFeel();
+  assert.equal(ctx.pendingActions.length, 3);
+  assert.equal(JSON.stringify(ctx.pendingActions[2].value), JSON.stringify(first));
+  assert.equal(JSON.stringify(ctx.previousScrollFeels.apple), JSON.stringify(second));
+}

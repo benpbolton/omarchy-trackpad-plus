@@ -23,6 +23,7 @@ Rectangle {
     name: "CurveEditor"
     when: windowShown
     function init() {
+      editor.kind = "pointer"
       editor.saved = {profile: "adaptive", curve: Curve.defaults()}
       editor.gainMaximum = 3.5
       editor.busy = false
@@ -52,6 +53,23 @@ Rectangle {
       editor.choose("mac")
       compare(editor.draft.curve.fast, 1)
       verify(!editor.curveExceedsRange)
+    }
+    function test_scroll_preset_and_controls_ignore_pointer_scale() {
+      editor.kind = "scroll"
+      editor.saved = {profile: "mac", curve: Curve.scrollDefaults()}
+      editor.begin()
+      for (var i = 0; i < 3; i++) {
+        editor.gainMaximum = [0.1, 1, 3][i]
+        editor.choose("mac")
+        compare(editor.draft.curve.precision, 1)
+        compare(editor.draft.curve.fast, 2)
+        compare(findChild(editor, "curveSpinner3").to, 100000)
+        var plot = findChild(editor, "curvePlot")
+        compare(plot.py(10), plot.topInset)
+        editor.adjust(3, 12)
+        compare(editor.draft.curve.fast, 10)
+      }
+      compare(applied.count, 0)
     }
     function test_failed_save_is_not_labelled_applied() {
       editor.settingsError = "Compositor unavailable"

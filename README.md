@@ -49,7 +49,10 @@ gestures apply across trackpads.
   configure tapping, typing protection, and two-finger right click. System and
   Flat profiles also expose **Pointer Speed**.
 - **Scrolling:** adjust **Scroll Speed** and **Natural Scrolling** independently
-  of the pointer curve.
+  of the pointer curve. Optional **Progressive Scrolling** applies a separate
+  acceleration curve so slow swipes stay precise and faster flicks cover more
+  distance. It requires a custom pointer profile (Mac-inspired or Custom);
+  turning it on from System or Flat switches pointer feel to Mac-inspired.
 - **Gestures:** configure horizontal workspace swipes and an optional upward
   swipe for the workspace overview. Test the overview before applying gestures.
 
@@ -58,8 +61,9 @@ gestures apply across trackpads.
 - Enable or disable the selected trackpad.
 - Scroll speed (0.01–1.00, in 0.01 steps) with a per-device scale, and pointer speed (−1.0–1.0).
 - Pointer feel: System (adaptive), Flat, Mac-inspired, and Custom profiles.
+- Progressive scrolling with a Mac-inspired or Custom scroll acceleration curve.
 - Visual acceleration editor with draggable precision, acceleration start/end, and fast-swipe
-  handles, keyboard adjustment, target practice, and Restore previous.
+  handles, keyboard adjustment, target practice (pointer only), and Restore previous.
 - Natural scrolling, tap to click, disable while typing, and clickfinger behavior.
 - Keyboard navigation through device selection, sliders, and switches.
 
@@ -70,8 +74,8 @@ requests native typing protection where the driver supports it (external Apple
 Magic Trackpads need the optional guard below); **Two-Finger Right Click** enables a
 secondary click by pressing with two fingers.
 
-The sliders and toggles save as you use them. Pointer-curve edits stay in
-preview until you press **Apply & try**.
+The sliders and toggles save as you use them. Pointer-curve and scroll-curve
+edits stay in preview until you press **Apply & try**.
 
 The footer shows the installed version, starting with **2026.09.13.0**. Releases
 use **YYYY.MM.DD.N**: release date followed by a revision starting at 0 and
@@ -400,6 +404,27 @@ effective `scroll_factor` and separate `scroll_scale`; only the effective factor
 is emitted to Hyprland. Back up both plugin and settings before upgrading;
 downgrading requires restoring the matching settings backup.
 
+## Progressive scrolling
+
+Open **Scrolling** and turn on **Progressive Scrolling** to make faster
+two-finger flicks travel farther. It is off by default, so existing scrolling
+stays linear. **Scroll Speed** and **Device scale** still control the overall
+scroll speed. The default curve adds a **1× multiplier for slow movement** and
+smoothly rises to **2× for fast flicks**, independent of Device scale.
+
+Use **Scroll acceleration** to choose **Mac-inspired** or edit a **Custom**
+curve. Its chart and gain controls have a separate **10× maximum**. Press
+**Apply & try** to save; **Restore previous** swaps back to the last applied
+scroll curve for that device. Choosing **Mac-inspired** restores the 1×–2×
+shape without changing Scroll Speed or Device scale.
+
+Progressive scrolling requires libinput's custom acceleration profile.
+Enabling it while the pointer uses **System** or **Flat** also selects the
+Mac-inspired pointer curve. You can then edit the pointer curve separately.
+Choosing **System** or **Flat** again disables progressive scrolling. Turning
+**Progressive Scrolling** off restores linear scrolling while keeping your
+pointer curve and saved scroll curve.
+
 ## How pointer feel works
 
 <img src="assets/screenshots/pointer-feel.png" alt="Custom pointer curve on a MacBook Air M2: precision 0.0100, start 0%, end 100%, and fast swipes 0.3500, on a 0–1× chart" width="430">
@@ -468,7 +493,9 @@ Each custom curve is validated with the installed libinput library before it
 is applied or saved. Libinput accepts at most 64 points; Hyprland 0.56 does not
 report point-validation failures through `hyprctl eval`, so the compositor's
 response alone is insufficient. Custom profiles use an identity scroll curve
-before the separate scroll multiplier. Legacy three-handle curves preserve
+before the separate scroll multiplier, unless **Progressive Scrolling** is on.
+Then the same sampling writes a `scroll_points` curve independently of the
+pointer curve. Legacy three-handle curves preserve
 their intended shape during migration and appear as Custom.
 
 Newly applied Mac-inspired and Custom curves account for the trackpad sensor's

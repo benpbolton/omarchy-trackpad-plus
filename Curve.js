@@ -1,13 +1,17 @@
 // Editor gain controls are sampled as output velocities for libinput.
 function defaults() { return { precision: 0.3, start: 0.8, end: 2.8, fast: 1.6 } }
 
-function presetForScale(maximum) {
-  var curve = defaults()
+// Slow two-finger motion stays near 1:1; faster flicks cover more distance.
+function scrollDefaults() { return { precision: 1.0, start: 0.5, end: 2.2, fast: 2.0 } }
+
+function scalePreset(curve, maximum) {
   var factor = Math.min(1, maximum / curve.fast)
   curve.precision = Math.max(0.01, Number((curve.precision * factor).toFixed(6)))
   curve.fast = Number((curve.fast * factor).toFixed(6))
   return curve
 }
+
+function presetForScale(maximum) { return scalePreset(defaults(), maximum) }
 
 function copy(value) { return JSON.parse(JSON.stringify(value)) }
 
@@ -63,4 +67,11 @@ function fromSettings(settings) {
   }
 }
 
-if (typeof module !== "undefined") module.exports = { defaults, presetForScale, copy, normalize, gain, points, sampledGain, adjust, fromSettings }
+function fromScrollSettings(settings) {
+  return {
+    profile: settings.scroll_curve_preset || "mac",
+    curve: normalize(settings.scroll_curve || scrollDefaults())
+  }
+}
+
+if (typeof module !== "undefined") module.exports = { defaults, scrollDefaults, presetForScale, copy, normalize, gain, points, sampledGain, adjust, fromSettings, fromScrollSettings }

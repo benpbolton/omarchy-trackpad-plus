@@ -23,6 +23,10 @@ GENERATED = STATE_ROOT / 'omarchy/toggles/hypr/zz-local-touchpads.lua'
 BOOLS = {'enabled', 'natural_scroll', 'tap_to_click', 'disable_while_typing', 'clickfinger_behavior'}
 RANGES = {'sensitivity': (-1, 1), 'scroll_factor': (0.001, 10), 'scroll_scale': (0.1, 10)}
 DEFAULT_CURVE = {'precision': 0.3, 'start': 0.8, 'end': 2.8, 'fast': 1.6}
+# Slow two-finger motion stays near 1:1; faster flicks gain more distance, like macOS.
+DEFAULT_SCROLL_CURVE = {'precision': 1.0, 'start': 0.5, 'end': 2.2, 'fast': 2.0}
+IDENTITY_SCROLL = '1 0 1'
+METADATA = {'curve', 'curve_preset', 'scroll_scale', 'scroll_progressive', 'scroll_curve', 'scroll_curve_preset'}
 MAX_STATE_BYTES = 1024 * 1024
 BUILTIN_APPLE = {'apple-mtp-multi-touch', 'apple-spi-trackpad', 'apple-spi-touchpad',
                  'bcm5974', 'apple-inc.-apple-internal-keyboard-/-trackpad-1'}
@@ -42,6 +46,17 @@ def validate_curve(value):
     if value['fast'] < value['precision']:
         raise ValueError('Fast movement must not be slower than precision movement')
     return value
+
+
+def preset_for_scale(maximum, base=None):
+    """Keep Curve.js presetForScale / scrollPresetForScale in sync with this."""
+    curve = dict(base or DEFAULT_CURVE)
+    factor = min(1.0, float(maximum) / curve['fast'])
+    curve['precision'] = max(0.01, round(curve['precision'] * factor, 6))
+    curve['fast'] = round(curve['fast'] * factor, 6)
+    if curve['fast'] < curve['precision']:
+        curve['fast'] = curve['precision']
+    return validate_curve(curve)
 
 
 def curve_profile(curve, resolution=None):
@@ -120,6 +135,11 @@ def validate_calibration(value, names=None):
     return value
 
 
+def scroll_profile(curve):
+    """Hyprland scroll_points is '<step> <points...>' without a custom prefix."""
+    return curve_profile(curve).removeprefix('custom ')
+
+
 def hypr(*args):
     """Bound both runtime and output; kill and reap failed compositor requests."""
     command = ['hyprctl', *args]
@@ -153,7 +173,7 @@ def hypr(*args):
             process.wait()
 
 
-def validate_native_profile(profile):
+def validate_native_profile(profile, scroll_points=None):
     """Check libinput itself: Hyprland 0.56 ignores set_points' error status.
 
     This creates a configuration object only; it does not open input devices or
@@ -174,7 +194,13 @@ def validate_native_profile(profile):
         fields = profile.split()
         step = float(fields[1])
         values = list(map(float, fields[2:]))
-        for motion_type, spacing, points in [(1, step, values), (2, 1.0, [0.0, 1.0])]:
+        if scroll_points:
+            scroll_fields = scroll_points.split()
+            scroll_step = float(scroll_fields[0])
+            scroll_values = list(map(float, scroll_fields[1:]))
+        else:
+            scroll_step, scroll_values = 1.0, [0.0, 1.0]
+        for motion_type, spacing, points in [(1, step, values), (2, scroll_step, scroll_values)]:
             native_points = (ctypes.c_double * len(points))(*points)
             status = lib.libinput_config_accel_set_points(config, motion_type, spacing, len(points), native_points)
             if status != 0:
@@ -183,8 +209,9 @@ def validate_native_profile(profile):
         lib.libinput_config_accel_destroy(config)
 
 
-def validate_native_curve(curve):
-    validate_native_profile(curve_profile(curve))
+def validate_native_curve(curve, scroll_curve=None):
+    validate_native_profile(curve_profile(curve),
+                            scroll_profile(scroll_curve) if scroll_curve is not None else None)
 
 
 def validate_name(name):
@@ -205,6 +232,14 @@ def validate_setting(key, value):
     elif key == 'curve_preset':
         if value not in ('mac', 'custom'):
             raise ValueError('Unknown curve preset')
+    elif key == 'scroll_progressive':
+        if type(value) is not bool:
+            raise ValueError('Expected a boolean')
+    elif key == 'scroll_curve':
+        validate_curve(value)
+    elif key == 'scroll_curve_preset':
+        if value not in ('mac', 'custom'):
+            raise ValueError('Unknown scroll curve preset')
     elif key in BOOLS:
         if type(value) is not bool:
             raise ValueError('Expected a boolean')
@@ -250,7 +285,7 @@ def lua_for(groups):
             fields = []
             for key, value in sorted(group['settings'].items()):
                 validate_setting(key, value)
-                if key in ('curve', 'curve_preset', 'scroll_scale'):
+                if key in METADATA:
                     continue  # Editor metadata is never emitted as a Hyprland option.
                 if key == 'accel_profile' and value == 'custom':
                     # Per device: one group can mix sensors of different resolutions.
@@ -258,8 +293,9 @@ def lua_for(groups):
                                           group.get('curve_calibration', {}).get(name))
                 fields.append(f'{key} = {json.dumps(value)}')
             if group['settings'].get('accel_profile') == 'custom':
-                # Explicit identity scrolling, independent of the pointer curve.
-                fields.append('scroll_points = "1 0 1"')
+                scroll = group['settings']
+                points = scroll_profile(scroll.get('scroll_curve', DEFAULT_SCROLL_CURVE)) if scroll.get('scroll_progressive') else IDENTITY_SCROLL
+                fields.append('scroll_points = ' + json.dumps(points))
             lines.append('hl.device({ name = ' + json.dumps(name) + ', ' + ', '.join(fields) + ' })')
     return '\n'.join(lines + ['end']) + '\n'
 
@@ -374,7 +410,7 @@ def validate_state(state):
     all_names = set()
     for key, group in devices.items():
         validate_name(key)
-        if not isinstance(group, dict) or set(group) - {'id', 'label', 'names', 'settings', 'previous_pointer_feel', 'configured', 'curve_calibration'}:
+        if not isinstance(group, dict) or set(group) - {'id', 'label', 'names', 'settings', 'previous_pointer_feel', 'previous_scroll_feel', 'configured', 'curve_calibration'}:
             raise ValueError('Invalid trackpad group')
         if group.get('id') != key or not isinstance(group.get('label'), str) or not 1 <= len(group['label']) <= 128:
             raise ValueError('Invalid trackpad identity')
@@ -401,10 +437,19 @@ def validate_state(state):
         if 'previous_pointer_feel' in group:
             validate_change('pointer_feel', group['previous_pointer_feel'])
             validate_calibration(group['previous_pointer_feel'].get('calibration', {}), names)
+        if 'previous_scroll_feel' in group:
+            validate_change('scroll_feel', group['previous_scroll_feel'])
     return state
 
 
 def validate_change(option, value):
+    if option == 'scroll_feel':
+        if not isinstance(value, dict) or set(value) != {'profile', 'curve'}:
+            raise ValueError('Expected a scroll profile and curve')
+        if value['profile'] not in ('mac', 'custom'):
+            raise ValueError('Unknown scroll profile')
+        validate_curve(value['curve'])
+        return
     if option not in ('pointer_feel', 'pointer_restore'):
         validate_setting(option, value)
         return
@@ -458,10 +503,13 @@ def restore_previous(state, key, persist=True):
 def validate_persisted(state):
     validate_state(state)
     for group in state['devices'].values():
-        if group['settings'].get('accel_profile') == 'custom':
-            validate_native_curve(group['settings'].get('curve', DEFAULT_CURVE))
+        settings = group['settings']
+        if settings.get('accel_profile') == 'custom':
+            scroll = settings.get('scroll_curve', DEFAULT_SCROLL_CURVE) if settings.get('scroll_progressive') else None
+            validate_native_curve(settings.get('curve', DEFAULT_CURVE), scroll)
             for resolution in set(group.get('curve_calibration', {}).values()):
-                validate_native_profile(curve_profile(group['settings'].get('curve', DEFAULT_CURVE), resolution))
+                validate_native_profile(curve_profile(settings.get('curve', DEFAULT_CURVE), resolution),
+                                        scroll_profile(scroll) if scroll else None)
 
 
 def save(state):
@@ -603,6 +651,32 @@ def capture_calibration(names, saved):
             if (resolution := device_resolution(name) or saved.get(name)) is not None}
 
 
+def ensure_custom_pointer(group):
+    """Progressive scroll_points only apply when accel_profile is custom."""
+    settings = group['settings']
+    if settings.get('accel_profile') == 'custom':
+        return
+    old_profile = settings.get('accel_profile', 'adaptive')
+    group['previous_pointer_feel'] = {
+        'profile': old_profile,
+        'curve': copy.deepcopy(settings.get('curve', DEFAULT_CURVE)),
+        'calibration': copy.deepcopy(group.get('curve_calibration', {})),
+    }
+    scale = settings.get('scroll_scale', max(1, settings.get('scroll_factor', 1)))
+    settings['accel_profile'] = 'custom'
+    settings['curve'] = preset_for_scale(scale)
+    settings['curve_preset'] = 'mac'
+    group['curve_calibration'] = capture_calibration(group['names'], group.get('curve_calibration', {}))
+
+
+def enable_progressive_scroll(group):
+    settings = group['settings']
+    ensure_custom_pointer(group)
+    settings.setdefault('scroll_curve', dict(DEFAULT_SCROLL_CURVE))
+    settings.setdefault('scroll_curve_preset', 'mac')
+    settings['scroll_progressive'] = True
+
+
 def change(state, key, option, value):
     validate_state(state)
     if key not in state['devices'] and key in LEGACY_APPLE:
@@ -614,10 +688,10 @@ def change(state, key, option, value):
     updated = copy.deepcopy(state)
     if updated['devices'][key].get('configured') is False:
         updated['devices'][key]['configured'] = True
-    settings = updated['devices'][key]['settings']
+    group = updated['devices'][key]
+    settings = group['settings']
     if option in ('pointer_feel', 'pointer_restore'):
         validate_change(option, value)
-        group = updated['devices'][key]
         previous = group.get('previous_pointer_feel')
         # Undo is explicit; a fresh Apply may equal the old curve numerically.
         restoring = option == 'pointer_restore' or 'calibration' in value
@@ -626,11 +700,9 @@ def change(state, key, option, value):
         if 'calibration' in value and not restoring:
             raise ValueError('Calibration can only restore the saved previous pointer feel')
         profile = value['profile']
-        if profile not in ('adaptive', 'flat', 'mac', 'custom'):
-            raise ValueError('Unknown pointer profile')
-        curve = validate_curve(value['curve'])
+        curve = value['curve']
         old_profile = settings.get('accel_profile', 'adaptive')
-        updated['devices'][key]['previous_pointer_feel'] = {
+        group['previous_pointer_feel'] = {
             'profile': settings.get('curve_preset', 'custom') if old_profile == 'custom' else old_profile,
             'curve': copy.deepcopy(settings.get('curve', DEFAULT_CURVE)),
             'calibration': copy.deepcopy(group.get('curve_calibration', {})),
@@ -647,11 +719,24 @@ def change(state, key, option, value):
         settings['accel_profile'] = 'custom' if profile in ('mac', 'custom') else profile
         settings['curve'] = dict(curve)  # The editor sizes new presets to the device range.
         settings['curve_preset'] = 'mac' if profile == 'mac' else 'custom'
+        if profile in ('adaptive', 'flat'):
+            settings['scroll_progressive'] = False
+    elif option == 'scroll_feel':
+        validate_change(option, value)
+        group['previous_scroll_feel'] = {
+            'profile': settings.get('scroll_curve_preset', 'mac'),
+            'curve': copy.deepcopy(settings.get('scroll_curve', DEFAULT_SCROLL_CURVE)),
+        }
+        enable_progressive_scroll(group)
+        settings['scroll_curve'] = dict(value['curve'])
+        settings['scroll_curve_preset'] = 'mac' if value['profile'] == 'mac' else 'custom'
     else:
         validate_setting(option, value)
         if option == 'scroll_scale':
             old_scale = settings.get('scroll_scale', max(1, settings['scroll_factor']))
             settings['scroll_factor'] = round(settings['scroll_factor'] * value / old_scale, 6)
+        if option == 'scroll_progressive' and value:
+            enable_progressive_scroll(group)
         settings[option] = value
     # Validate every persisted curve before touching the compositor or disk.
     validate_persisted(updated)

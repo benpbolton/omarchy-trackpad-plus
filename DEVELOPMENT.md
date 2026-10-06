@@ -39,7 +39,8 @@ This release identifier is separate from the backend's settings schema version.
   Pointer Undo uses the backend's explicit `pointer_restore` operation; fresh
   `pointer_feel` Apply requests must not be inferred as Undo from curve equality.
 - `CurveEditor.qml` / `Curve.js`: draft curve editing, spinners, presets, and
-  target practice. Only Apply changes the live profile.
+  target practice. Pointer and scroll modes share the editor; only Apply
+  changes the live profile. Keep sampled curves in sync with `trackpads.py`.
 - `trackpads.py`: device discovery, validation, file locking, persistence, and
   per-device `hl.device` updates. The libinput validator creates configuration
   objects without opening devices. Keep its sampled curve in sync with Curve.js.
@@ -121,10 +122,17 @@ Scroll scale is per-group settings metadata. The backend stores the effective
 Scale changes rescale the effective value in the same journaled transaction;
 queued slider edits must commit under their old scale first. Schema 4 migration
 adds scale metadata without changing effective factors or generated Lua.
-The editor also uses that scale as its vertical gain limit. Saved curves stay in
+The pointer editor also uses that scale as its vertical gain limit. Saved curves stay in
 absolute gain units; changing the axis does not rescale them. Newly selected
 Mac-inspired presets fit the available range, and the backend applies the exact
 validated curve supplied by the editor, including when restoring a preset.
+Progressive scrolling is opt-in. Its curve is an independent multiplier before
+`scroll_factor`, with a fixed 1×–2× default and a separate 10× editor gain limit.
+Neither choosing the scroll preset nor changing `scroll_scale` rescales a saved
+scroll curve. Consecutive `scroll_feel` writes retain their queue order, like
+`pointer_feel`, so Apply/Restore preserves the previous curve. Progressive
+scrolling requires the custom pointer profile; enabling it from System/Flat
+selects a Mac-inspired pointer curve, and choosing System/Flat disables it.
 Do not change saved group IDs or historical state paths without a migration.
 
 ## Complete automated suite
