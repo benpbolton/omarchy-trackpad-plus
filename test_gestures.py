@@ -308,7 +308,7 @@ class GestureTests(unittest.TestCase):
         with patch.object(g, 'hymission_status', return_value=dict(available=True, version='0.7.0', message='HyMission loaded')):
             g.change(settings)
         text = g.INPUT.read_text()
-        self.assertEqual(g.inspect(text)['settings'], dict(settings, overview_provider='hymission'))
+        self.assertEqual(g.inspect(text)['settings'], dict(settings, overview_provider='hymission', fullscreen_up=False, scratchpad_down=False))
         for loaded in (False, True):
             lua = 'local native, plugin = {}, {}\nhl = {config=function() end, device=function() end, plugin={}, gesture=function(d) table.insert(native,d) end}\n'
             if loaded:
@@ -359,7 +359,7 @@ class GestureTests(unittest.TestCase):
         g.INPUT.write_text(source)
         self.assertFalse(g.inspect(source)['settings']['overview'])
         g.change(legacy)
-        self.assertEqual(g.inspect(g.INPUT.read_text())['settings'], dict(self.settings, overview_provider='hymission'))
+        self.assertEqual(g.inspect(g.INPUT.read_text())['settings'], dict(self.settings, overview_provider='hymission', fullscreen_up=False, scratchpad_down=False))
         g.restore()
         self.assertEqual(g.INPUT.read_text(), INPUT)
 
@@ -368,7 +368,7 @@ class GestureTests(unittest.TestCase):
         with patch('platform.machine', return_value='aarch64'):
             g.change(settings)
         source = g.INPUT.read_text()
-        self.assertEqual(g.parse(source)[2], settings)
+        self.assertEqual(g.parse(source)[2], dict(settings, fullscreen_up=False, scratchpad_down=False))
         self.assertNotIn('hl.plugin.hymission', source)
         lua = ('local native, commands = {}, {}\n'
                'hl={config=function() end, layer_rule=function(r) assert(r.match.namespace == "^trackpad-plus-overview$" and r.no_anim and r.animation == "none") end, gesture=function(d) table.insert(native,d) end, '
@@ -384,7 +384,7 @@ class GestureTests(unittest.TestCase):
                '\nassert(native[3].action.start == nil)\nnative[3].action.finish({cancelled=false})'
                '\nassert(#commands == 2 and commands[2] == ' + json.dumps(g.COMPANION_COMMAND + 'close') + ')')
         subprocess.run(['lua', '-'], input=lua, text=True, capture_output=True, check=True)
-        self.assertIn('"version": 7', source)
+        self.assertIn('"version": 8', source)
         g.restore()
         self.assertEqual(g.INPUT.read_text(), INPUT)
 
@@ -406,7 +406,7 @@ hl.config({ gestures = { workspace_swipe_distance = 300, workspace_swipe_invert 
             self.assertEqual(g.INPUT.read_text(), historical)
             if mode == 'migrate':
                 g.change(parsed[2])
-                self.assertIn('"version": 7', g.INPUT.read_text())
+                self.assertIn('"version": 8', g.INPUT.read_text())
                 self.assertEqual(g.parse(g.INPUT.read_text())[3], BINDING + '\n')
             elif mode == 'failed-migration':
                 with patch.object(g, 'reload_checked', side_effect=[RuntimeError('unsupported callback API'), None]):
@@ -436,8 +436,8 @@ hl.config({ gestures = { workspace_swipe_distance = 300, workspace_swipe_invert 
                 g.change(settings)
         self.assertEqual(g.INPUT.read_text(), fixture)
         g.change(settings)
-        self.assertIn('"version": 7', g.INPUT.read_text())
-        self.assertEqual(g.parse(g.INPUT.read_text())[2], settings)
+        self.assertIn('"version": 8', g.INPUT.read_text())
+        self.assertEqual(g.parse(g.INPUT.read_text())[2], dict(settings, fullscreen_up=False, scratchpad_down=False))
         g.restore()
         self.assertEqual(g.INPUT.read_text(), '')
 
@@ -490,7 +490,7 @@ hl.config({ gestures = { workspace_swipe_distance = 300, workspace_swipe_invert 
         self.assertEqual(g.INPUT.read_text(), fixture)
         g.change(parsed[2])
         source = g.INPUT.read_text()
-        self.assertIn('"version": 7', source)
+        self.assertIn('"version": 8', source)
         self.assertIn('namespace = "^trackpad-plus-overview$"', source)
         self.assertIn('no_anim = true', source)
         g.change(dict(parsed[2], overview=False))
@@ -626,11 +626,11 @@ hl.config({ gestures = { workspace_swipe_distance = 300, workspace_swipe_invert 
         settings = dict(self.settings, distance=725, invert=True)
         with patch.object(g, 'runtime_settings', return_value=dict(distance=725, invert=True)):
             g.change(settings)
-        self.assertEqual(g.parse(g.INPUT.read_text())[2], dict(settings, overview_provider='hymission'))
+        self.assertEqual(g.parse(g.INPUT.read_text())[2], dict(settings, overview_provider='hymission', fullscreen_up=False, scratchpad_down=False))
         with patch.object(g, 'runtime_settings', return_value=dict(distance=725, invert=False)):
             with self.assertRaisesRegex(RuntimeError, 'do not match'):
                 g.change(settings)
-        self.assertEqual(g.parse(g.INPUT.read_text())[2], dict(settings, overview_provider='hymission'))
+        self.assertEqual(g.parse(g.INPUT.read_text())[2], dict(settings, overview_provider='hymission', fullscreen_up=False, scratchpad_down=False))
 
     def test_runtime_override_rolls_back(self):
         with patch.object(g, 'runtime_settings', return_value=dict(distance=900, invert=False)):
@@ -704,5 +704,70 @@ hl.config({ gestures = { workspace_swipe_distance = 300, workspace_swipe_invert 
         with self.assertRaisesRegex(ValueError, 'changed'): g.recover()
         self.assertEqual(g.INPUT.read_text(), 'manual edit')
         self.assertTrue(g.JOURNAL.exists())
+
+    def test_mac_vertical_swipes_emit_canonical_lua_and_restore(self):
+        settings = dict(self.settings, enabled=True, fingers=4, fullscreen_up=True, scratchpad_down=True)
+        g.change(settings)
+        source = g.INPUT.read_text()
+        self.assertIn('"version": 8', source)
+        self.assertIn('hl.gesture({ fingers = 4, direction = "up", action = "fullscreen" })', source)
+        self.assertIn('hl.gesture({ fingers = 4, direction = "down", action = "special", workspace_name = "scratchpad" })', source)
+        self.assertEqual(g.parse(source)[2], dict(settings, overview_provider='hymission'))
+        lua = ('local native = {}\nhl = {config=function() end, gesture=function(d) table.insert(native,d) end}\n' + source +
+               '\nassert(#native == 3 and native[1].direction == "horizontal" and native[1].action == "workspace")'
+               '\nassert(native[2].direction == "up" and native[2].action == "fullscreen")'
+               '\nassert(native[3].direction == "down" and native[3].action == "special" and native[3].workspace_name == "scratchpad")')
+        subprocess.run(['lua', '-'], input=lua, text=True, capture_output=True, check=True)
+        g.restore()
+        self.assertEqual(g.INPUT.read_text(), INPUT)
+
+    def test_mac_vertical_swipes_need_swipe_and_reject_overview(self):
+        for settings in (dict(self.settings, enabled=True, overview=True, fullscreen_up=True),
+                         dict(self.settings, enabled=True, overview=True, scratchpad_down=True),
+                         dict(self.settings, enabled=False, fullscreen_up=True),
+                         dict(self.settings, enabled=False, scratchpad_down=True)):
+            with self.subTest(settings=settings):
+                with self.assertRaises(ValueError):
+                    g.change(settings)
+                self.assertEqual(g.INPUT.read_text(), INPUT)
+                self.assertFalse(g.JOURNAL.exists())
+
+    def test_manual_scratchpad_line_blocks_vertical_opt_ins_and_survives_plain_apply(self):
+        vertical = 'hl.gesture({ fingers = 4, direction = "down", action = "special", workspace_name = "scratchpad" })\n'
+        g.INPUT.write_text(INPUT + vertical)
+        with self.assertRaisesRegex(ValueError, 'vertical'):
+            g.change(dict(self.settings, enabled=True, fingers=4, scratchpad_down=True))
+        with self.assertRaises(ValueError):
+            g.change(dict(self.settings, overview=True))
+        self.assertEqual(g.INPUT.read_text(), INPUT + vertical)
+        g.change(self.settings)
+        self.assertIn('workspace_name = "scratchpad"', g.INPUT.read_text())
+
+    def test_schema_seven_preserves_bytes_until_edit_and_restores_original(self):
+        settings = dict(self.settings, overview=False, overview_provider='hymission')
+        original = 'hl.gesture({ fingers = 3, direction = "horizontal", action = "workspace" })\n'
+        previous = INPUT.replace(original, g.ANCHOR) + g.block(settings, original, version=7)
+        g.INPUT.write_text(previous)
+        self.assertTrue(g.inspect(previous)['can_edit'])
+        self.assertEqual(g.INPUT.read_text(), previous)
+        g.change(dict(settings, fullscreen_up=True))
+        self.assertEqual(g.parse(g.INPUT.read_text())[2]['fullscreen_up'], True)
+        self.assertIn('"version": 8', g.INPUT.read_text())
+        g.restore()
+        self.assertEqual(g.INPUT.read_text(), INPUT)
+
+    def test_vertical_flags_require_booleans(self):
+        for field in ('fullscreen_up', 'scratchpad_down'):
+            for value in (1, 'true', None):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        g.validate(dict(self.settings, **{field: value}))
+
+    def test_schema_eight_block_round_trips(self):
+        settings = dict(self.settings, enabled=True, fingers=4, fullscreen_up=True)
+        text = g.block(settings, '', version=8)
+        parsed = g.parse(text)
+        self.assertEqual(parsed[2], dict(settings, overview_provider='hymission', scratchpad_down=False))
+        self.assertEqual(g.block(parsed[2], parsed[3], version=8), text)
 
 if __name__ == '__main__': unittest.main()

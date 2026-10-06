@@ -40,23 +40,38 @@ def masked(source, strings=False):
 
 
 def validate(settings):
-    if not isinstance(settings, dict) or set(settings) not in ({'enabled', 'fingers', 'distance', 'invert'}, {'enabled', 'fingers', 'distance', 'invert', 'overview'}, {'enabled', 'fingers', 'distance', 'invert', 'overview', 'overview_provider'}):
+    if not isinstance(settings, dict):
+        raise ValueError('Expected workspace swipe settings')
+    required = {'enabled', 'fingers', 'distance', 'invert'}
+    optional = {'overview', 'overview_provider', 'fullscreen_up', 'scratchpad_down'}
+    if required - set(settings) or set(settings) - (required | optional):
         raise ValueError('Expected workspace swipe settings')
     if type(settings['enabled']) is not bool or type(settings['invert']) is not bool:
         raise ValueError('Expected an on/off value')
     if type(settings.get('overview', False)) is not bool:
         raise ValueError('Expected an overview on/off value')
+    for key in ('fullscreen_up', 'scratchpad_down'):
+        if type(settings.get(key, False)) is not bool:
+            raise ValueError('Expected an on/off value')
+    if 'overview_provider' in settings and settings['overview_provider'] not in PROVIDERS:
+        raise ValueError('Choose Trackpad Plus or HyMission for overview')
+    if settings.get('overview', False) and (settings.get('fullscreen_up', False) or settings.get('scratchpad_down', False)):
+        raise ValueError('Overview owns up and down swipes; turn it off for fullscreen or scratchpad')
+    if (settings.get('fullscreen_up', False) or settings.get('scratchpad_down', False)) and not settings['enabled']:
+        raise ValueError('Fullscreen and scratchpad swipes need workspace swipe enabled')
     if type(settings['fingers']) is not int or settings['fingers'] not in (3, 4):
         raise ValueError('Choose three or four fingers')
     if type(settings['distance']) is not int or not 50 <= settings['distance'] <= 2000:
         raise ValueError('Swipe distance must be between 50 and 2000')
-    if 'overview_provider' in settings and settings['overview_provider'] not in PROVIDERS:
-        raise ValueError('Choose Trackpad Plus or HyMission for overview')
     return settings
 
 
 def normalized(settings):
-    return dict(validate(settings), overview=settings.get('overview', False))
+    merged = dict(validate(settings))
+    merged.setdefault('overview', False)
+    merged.setdefault('fullscreen_up', False)
+    merged.setdefault('scratchpad_down', False)
+    return merged
 
 
 def companion_status(operation='status'):
@@ -159,7 +174,18 @@ def find_binding(source):
         previous_end = match.end()
         if any(depths.values()):
             raise ValueError('Nested gestures must be managed in your Hyprland config')
-        fields = parse_call(match[1])
+        try:
+            fields = parse_call(match[1])
+        except ValueError:
+            # Four-field bindings such as the manual scratchpad line carry a
+            # workspace_name the adoption parser cannot represent. Keep them
+            # like plain vertical lines: never adopt, never drop. Requesting
+            # overview or Mac vertical swipes still refuses with a clear
+            # conflict in change().
+            if re.search(r'direction\s*=\s*["\'](vertical|up|down|swipe)', match[1]):
+                fields = {'direction': 'vertical-exotic'}
+            else:
+                raise
         if fields['direction'] in ('horizontal', 'left', 'right', 'swipe'):
             if fields['direction'] != 'horizontal' or fields['action'] != 'workspace':
                 raise ValueError('An existing horizontal gesture conflicts with workspace swiping')
@@ -172,10 +198,19 @@ def find_binding(source):
 
 def block(settings, original, separator='', version=3):
     validate(settings)
-    if version in (4, 5, 6, 7):
+    mac = bool(settings.get('fullscreen_up', False)) or bool(settings.get('scratchpad_down', False))
+    if version == 8:
         settings = dict(normalized(settings), overview_provider=overview_provider(settings))
+    elif mac:
+        raise ValueError('Unsupported gesture block version')
+    elif version in (4, 5, 6, 7):
+        settings = dict(normalized(settings), overview_provider=overview_provider(settings))
+        del settings['fullscreen_up']
+        del settings['scratchpad_down']
     elif version == 3 and 'overview_provider' not in settings:
         settings = normalized(settings)
+        del settings['fullscreen_up']
+        del settings['scratchpad_down']
     elif version != 2 or 'overview' in settings or 'overview_provider' in settings:
         raise ValueError('Unsupported gesture block version')
     if original:
@@ -219,6 +254,12 @@ def block(settings, original, separator='', version=3):
         if settings['enabled']:
             lines += ['else', '  ' + horizontal]
         lines.append('end')
+    elif settings.get('fullscreen_up') or settings.get('scratchpad_down'):
+        lines.append(horizontal)
+        if settings.get('fullscreen_up'):
+            lines.append('hl.gesture({ fingers = %d, direction = "up", action = "fullscreen" })' % settings['fingers'])
+        if settings.get('scratchpad_down'):
+            lines.append('hl.gesture({ fingers = %d, direction = "down", action = "special", workspace_name = "scratchpad" })' % settings['fingers'])
     elif settings['enabled']:
         lines.append(horizontal)
     lines += ['hl.config({ gestures = { workspace_swipe_distance = %d, workspace_swipe_invert = %s } })' %
@@ -250,7 +291,7 @@ def parse(source):
         try:
             data = json.loads(fragment.splitlines()[1][3:])
             if (set(data) != {'version', 'settings', 'original', 'separator'}
-                    or type(data['version']) is not int or data['version'] not in (2, 3, 4, 5, 6, 7)
+                    or type(data['version']) is not int or data['version'] not in (2, 3, 4, 5, 6, 7, 8)
                     or not isinstance(data['original'], str)):
                 raise ValueError('Unsupported gesture block version')
             if fragment != block(data['settings'], data['original'], data['separator'], data['version']):
@@ -283,7 +324,8 @@ def parse(source):
 
 def inspect(source):
     result = dict(managed=False, can_edit=True, can_restore=False, message='',
-                  settings=dict(enabled=False, fingers=3, distance=300, invert=False, overview=False),
+                  settings=dict(enabled=False, fingers=3, distance=300, invert=False, overview=False,
+                                fullscreen_up=False, scratchpad_down=False),
                   hymission=hymission_status(), companion=companion_status())
     try:
         managed = parse(source)
@@ -485,7 +527,7 @@ def change(settings):
     if not status['can_edit']:
         raise ValueError(status['message'])
     managed = parse(before)
-    # Only an explicit edit emits schema 7. An older caller editing a managed
+    # Only an explicit edit emits schema 8. An older caller editing a managed
     # block retains its current provider instead of silently reverting it.
     settings['overview_provider'] = settings.get('overview_provider', overview_provider(managed[2]) if managed else 'hymission')
     if settings['overview']:
@@ -505,18 +547,27 @@ def change(settings):
             base = before[:start] + ANCHOR + before[end:]
         else:
             original, base = '', before
-    if settings['overview']:
+    if settings['overview'] or settings.get('fullscreen_up') or settings.get('scratchpad_down'):
         # HyMission replaces matching native registrations. Never let an explicit
-        # overview opt-in replace a user's separate vertical gesture silently.
+        # vertical gesture opt-in replace a user's separate vertical gesture silently.
+        # The lenient check also catches four-field bindings such as the manual
+        # scratchpad line (direction down plus workspace_name), which the strict
+        # adoption parser cannot represent.
+        owner = 'overview' if settings['overview'] else 'fullscreen/scratchpad actions'
         code, structure = masked(base), masked(base, strings=True)
         for call in CALL.finditer(code):
             if structure[call.start():call.start()+len('hl.gesture')] != 'hl.gesture':
                 continue
-            fields = parse_call(call[1])
+            try:
+                fields = parse_call(call[1])
+            except ValueError:
+                if re.search(r'direction\s*=\s*["\'](vertical|up|down|swipe)', call[1]):
+                    raise ValueError('An existing vertical gesture conflicts with %s; manage it in your Hyprland config' % owner)
+                raise
             if fields['direction'] in ('vertical', 'up', 'down', 'swipe'):
-                raise ValueError('An existing vertical gesture conflicts with overview; manage it in your Hyprland config')
+                raise ValueError('An existing vertical gesture conflicts with %s; manage it in your Hyprland config' % owner)
     separator = '\n' if base and not base.endswith('\n') else ''
-    after = base + separator + block(settings, original, separator, version=7)
+    after = base + separator + block(settings, original, separator, version=8)
     # Validate the complete result before writing; appending to dynamic Lua is unsafe.
     parse(after)
     transact(before, after, target, expected=settings)

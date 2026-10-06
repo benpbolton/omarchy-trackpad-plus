@@ -274,8 +274,22 @@ images and window titles are not written to files, logs, or network services.
 Capture is limited to visible thumbnails and the current window page, with two simultaneous requests and a
 per-card deadline. Large source windows can still require large graphics buffers.
 
-Gesture block schemas 2–6 remain readable and restorable. An explicit edit
-writes schema 7 with the selected provider; this is separate from the pointer
+For optional vertical actions, open **Gestures**, enable **Workspace swipe**,
+choose three or four fingers, and turn on **Swipe up for fullscreen** or
+**Swipe down for scratchpad**. Press **Apply gestures** to save. Up toggles the
+active window's fullscreen state; down toggles Hyprland's special workspace
+named `scratchpad`. Put windows in that special workspace using your existing
+Hyprland bindings. Both actions are off by default and use the workspace swipe's
+finger count. Enabling either turns overview off; enabling overview clears both.
+Turning workspace swipe off also clears these actions. Existing manual vertical
+bindings must be managed in your Hyprland config before enabling these options.
+
+Palm rejection remains the separate, model-specific **Apple → Pointer** control
+for supported external Magic Trackpads. Built-in Apple SPI/MTP palm tuning is
+not included; those devices require separate hardware validation.
+
+Gesture block schemas 2–7 remain readable and restorable. An explicit edit
+writes schema 8 with the selected provider and optional vertical actions; this is separate from the pointer
 settings schema. With Trackpad Plus selected, Hyprland 0.56.2 gesture callbacks
 open the overview as soon as the upward swipe is recognized, without waiting for
 finger release. Reversing or cancelling the swipe afterward does not undo the

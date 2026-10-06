@@ -59,13 +59,20 @@ This release identifier is separate from the backend's settings schema version.
   adoption of literal bindings in input.lua, marked-block persistence and
   compare-before-restore recovery. Uses the existing bounded subprocesses,
   secure file writes, and state lock; never mixes gestures into device settings.
-  Managed block schema 7 opens the overview on upward gesture recognition;
+  Managed block schema 8 opens the overview on upward gesture recognition;
   there is no upward finish callback to reopen or undo it. Downward finish
   retains cancellation handling. A scoped layer rule suppresses compositor fades
-  for the built-in overview only. Schemas 2–6 remain readable and restorable; legacy overview maps to HyMission, and
+  for the built-in overview only. Schemas 2–7 remain readable and restorable; legacy overview maps to HyMission, and
   only an explicit edit upgrades the block. Provider detection must not start
   capture or replace the user's selection. HyMission's architecture guard applies
   only to that provider. Native horizontal bindings remain independent.
+  Schema 8 adds opt-in fullscreen-up and scratchpad-down actions, off by default.
+  Overview and these native vertical actions are mutually exclusive. Turning
+  workspace swipe off clears the optional actions. Old blocks stay byte-for-byte
+  unchanged until an explicit edit; restoration preserves the original binding.
+  Built-in Apple SPI/MTP palm thresholds require separate hardware validation;
+  use the existing safe model-specific palm backend, never replace the whole
+  system quirks file with a new template.
   Config resolution supports Stow file/directory links with bounded link traversal
   and directory ownership checks. Reads and atomic writes use the resolved target
   through the existing no-follow helpers, preserving the user's links. Gesture
