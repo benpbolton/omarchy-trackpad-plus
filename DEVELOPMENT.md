@@ -36,11 +36,24 @@ This release identifier is separate from the backend's settings schema version.
   The editor preserves drafts during polling and rejects stale device responses.
 - `Panel.qml`: Omarchy bar widget, device selection, debounced action queue,
   deadlines, and rejection of stale reads.
+  Pointer Undo uses the backend's explicit `pointer_restore` operation; fresh
+  `pointer_feel` Apply requests must not be inferred as Undo from curve equality.
 - `CurveEditor.qml` / `Curve.js`: draft curve editing, spinners, presets, and
   target practice. Only Apply changes the live profile.
 - `trackpads.py`: device discovery, validation, file locking, persistence, and
   per-device `hl.device` updates. The libinput validator creates configuration
   objects without opening devices. Keep its sampled curve in sync with Curve.js.
+  Curve.js plots gain per normalized unit. Explicit Mac/custom Apply captures
+  `curve_calibration` per saved interface name from unique sysfs names, udev
+  `EVDEV_ABS_00`, or known Apple USB/Bluetooth IDs. Duplicate native names
+  remain unscaled; added compositor `-N` suffixes never fall back to a base name.
+  A unique exact native name can be calibrated even when it ends in digits.
+  Rendering uses saved calibration, never live hardware. Schema 5 accepts versions 1–4 without recalibrating saved
+  curves; old undo records gain empty `calibration` metadata, preserving their
+  original spacing. Every pointer edit saves the previous curve and calibration;
+  undo payloads may restore that exact record. Device scale semantics stay the
+  same. Tests point `SYSFS_INPUT`/`UDEV_DATA` at temporary trees so host devices
+  never leak in.
 - `gestures.py` / `GestureEditor.qml`: global workspace gestures, explicit
   adoption of literal bindings in input.lua, marked-block persistence and
   compare-before-restore recovery. Uses the existing bounded subprocesses,

@@ -38,6 +38,22 @@ function context() {
 
 {
   const ctx = context();
+  ctx.actionProc.running = true;
+  ctx.devices[0].curve_calibration = { apple: 47 };
+  ctx.enqueue('pointer_feel', {profile: 'custom', curve: ctx.Curve.defaults()});
+  assert.equal(ctx.devices[0].previous_pointer_feel.calibration.apple, 47,
+    'optimistic undo must retain the old curve calibration');
+  ctx.loadSelection();
+  ctx.restorePointerFeel();
+  assert.equal(ctx.pendingActions.at(-1).option, 'pointer_restore');
+  assert.equal(ctx.pendingActions.at(-1).value.calibration.apple, 47,
+    'undo sends saved calibration to the backend');
+  assert.equal(Object.hasOwn(ctx.curveEditor.draft, 'calibration'), false,
+    'editable Apply drafts must not carry undo-only calibration');
+}
+
+{
+  const ctx = context();
   ctx.selectDevice('dell');
   ctx.actionProc.running = true;
   ctx.scrollDebounce.running = ctx.pointerDebounce.running = true;
