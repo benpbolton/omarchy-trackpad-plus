@@ -666,3 +666,16 @@ console.log('Imported Apply/undo, progressive scrolling, retained Mac-inspired, 
   assert.equal(ctx.settingsError, '', 'an explicit retry clears the previous save error');
 }
 console.log('Pointer state reconciliation race and progressive-scroll imported-data cleanup passed.');
+
+{
+  const ctx = context();
+  ctx.devices[0].imported_missing_interfaces = ['apple-inc.-magic-trackpad-2'];
+  ctx.loadSelection();
+  assert.equal(ctx.pointerMissingInterfaces[0], 'apple-inc.-magic-trackpad-2');
+  ctx.selectDevice('dell');
+  assert.equal(ctx.pointerMissingInterfaces.length, 0, 'missing-interface notices belong to the selected device');
+  const summary = qml.match(/objectName: "pointerFeelSummary"[\s\S]*?font\.pixelSize: Style\.font\.caption/)[0];
+  assert.match(summary, /textFormat: Text\.PlainText/, 'profile subtitle must keep imported markup literal');
+  assert.match(qml, /missingInterfaces: root\.curveKind === "pointer" \? root\.pointerMissingInterfaces : \[\]/,
+    'the warning belongs to the pointer editor, not the independent scroll editor');
+}

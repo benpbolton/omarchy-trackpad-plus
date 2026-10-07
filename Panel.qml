@@ -39,6 +39,7 @@ Panel {
   property var pointerFeel: ({ profile: "adaptive", curve: Curve.defaults() })
   property var previousFeels: ({})
   property bool pointerDrift: false
+  property var pointerMissingInterfaces: []
   // macOS profiles found for the selected trackpad, read when the editor opens.
   property var pointerProfiles: ({ loading: false, error: "", directory: "", profiles: [] })
   property int profilesRequest: 0
@@ -142,6 +143,7 @@ Panel {
     pointerAcceleration = v.accel_profile !== "flat"
     pointerFeel = Curve.fromSettings(v)
     pointerDrift = !!row.imported_drift
+    pointerMissingInterfaces = row.imported_missing_interfaces || []
     var previous = Curve.copy(previousFeels)
     if (row.previous_pointer_feel) previous[selectedDevice] = row.previous_pointer_feel
     else delete previous[selectedDevice]
@@ -846,6 +848,7 @@ Panel {
             settingsError: root.settingsError
             canRestore: root.curveKind === "scroll" ? !!root.previousScrollFeels[root.selectedDevice] : !!root.previousFeels[root.selectedDevice]
             drift: root.curveKind === "pointer" && root.pointerDrift
+            missingInterfaces: root.curveKind === "pointer" ? root.pointerMissingInterfaces : []
             profiles: root.pointerProfiles.device === root.selectedDevice ? root.pointerProfiles.profiles : []
             profilesDirectory: root.pointerProfiles.directory
             profilesStatus: root.pointerProfiles.loading ? "Looking for macOS profiles…" : root.pointerProfiles.error
@@ -1432,7 +1435,10 @@ Panel {
               Text {
                 width: parent.parent.width - Style.space(20)
                 elide: Text.ElideRight
+                objectName: "pointerFeelSummary"
+                textFormat: Text.PlainText
                 text: Curve.label(root.pointerFeel) + (root.pointerFeel.profile !== "imported" ? " · Presets and acceleration curve"
+                  : root.pointerMissingInterfaces.length ? " · Incomplete import, re-apply"
                   : root.pointerDrift ? " · Display scale changed, re-apply" : "")
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily

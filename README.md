@@ -575,6 +575,12 @@ Good to know:
   [What a curve cannot copy](tools/macos/README.md#what-a-curve-cannot-copy).
 - This option affects pointer movement only. Existing progressive scrolling stays
   independent; matching Apple's scrolling and inertia is separate work.
+- A trackpad interface attached after Apply may have no converted curve yet. It
+  retains native tracking and scrolling, and the panel marks the import incomplete.
+  Existing converted interfaces keep their profile and progressive scrolling.
+  Provide the new interface's resolution using the setup instructions, restore
+  the source JSON if it was removed, and choose **Re-apply for all interfaces**.
+  The warning clears once every saved interface has a converted curve.
 - Profiles are read-only data in `${XDG_CONFIG_HOME:-~/.config}/trackpad-plus/profiles/`
   (at most 32 files). Each must be a regular file owned by you and not writable by
   others; the directory may be a Stow link. Applying stores the converted curve,

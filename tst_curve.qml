@@ -32,6 +32,7 @@ Rectangle {
       editor.profiles = []
       editor.profilesStatus = ""
       editor.drift = false
+      editor.missingInterfaces = []
       editor.begin()
       applied.clear(); restored.clear(); back.clear()
     }
@@ -279,6 +280,40 @@ Rectangle {
          speeds: [0, 0.125, 0.5, 0.6875, 0.875, 1, 1.5, 2, 2.5, 3]},
         {file: "broken.json", error: "Unsupported pointer profile format"}
       ]
+    }
+    function test_profile_names_render_markup_as_literal_text() {
+      var rows = profileRows()
+      var name = '<img src="http://127.0.0.1:1/profile.png">'
+      rows[0].name = name
+      editor.profiles = rows
+      editor.choose("imported")
+      wait(20)
+      var row = findChild(editor, "profileRow0")
+      verify(row !== null)
+      compare(row.contentItem.textFormat, Text.PlainText)
+      compare(row.contentItem.text, name)
+      verify(row.contentItem.implicitWidth > 100, "the tag is rendered as text rather than an image")
+    }
+    function test_incomplete_import_warns_and_reapplies_existing_profile() {
+      editor.profiles = profileRows()
+      editor.saved = {profile: "imported", curve: Curve.defaults(), imported: converted()}
+      editor.missingInterfaces = ["apple-inc.-magic-trackpad-2"]
+      editor.begin()
+      wait(20)
+      var warning = findChild(editor, "importedIncomplete")
+      verify(warning.visible)
+      verify(warning.text.indexOf("apple-inc.-magic-trackpad-2") >= 0)
+      verify(warning.text.indexOf("native tracking") >= 0)
+      compare(warning.textFormat, Text.PlainText)
+      var reapply = findChild(editor, "reapplyProfile")
+      verify(reapply.visible)
+      compare(reapply.text, "Re-apply for all interfaces")
+      mouseClick(reapply)
+      compare(applied.count, 1)
+      verify(!applied.signalArguments[0][0].imported.devices)
+      editor.profiles = []
+      verify(!reapply.visible)
+      verify(warning.text.indexOf("Restore the source profile file") >= 0)
     }
     function converted() {
       return {name: "MacBook Pro (M1 Pro)", file: "mac.json", sha256: "a".repeat(64), tracking_speed: 0.875,

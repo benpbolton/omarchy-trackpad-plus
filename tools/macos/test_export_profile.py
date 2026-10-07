@@ -48,6 +48,24 @@ def recording(path, burst=0.0, rate=123.4, seed=7):
     path.write_text('\n'.join(lines) + '\n')
 
 
+def fractional_recording(path, profile, gain_bias=1):
+    """Record double raw counts with truncated integer columns, like the native probe."""
+    f = pp.apple_function(pp.apple_parameters(profile))
+    rate = 123.4
+    period = 1 / rate
+    timestamp, x = 1000.0, 1000000.0
+    lines = ['# global_bounds,0,0,10000000,10000000']
+    for speed in (12, 22, 47, 92, 180, 360):
+        for index in range(800):
+            raw = 400 * (speed / 25.4) / rate + ((index % 20 + 0.5) / 20 - 0.5)
+            delta, _ = pp.apple_event(f, raw, 0, period * 1000, profile['driver'])
+            timestamp += period
+            x += delta * gain_bias
+            lines.append(f'P,{timestamp},{timestamp},{x},1000000,{delta},0,{int(raw)},0,{raw},0,{delta},0')
+        timestamp += 0.2
+    path.write_text('\n'.join(lines) + '\n')
+
+
 class CheckTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -70,6 +88,27 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(result['fractional'])
         self.assertLess(result['median_error'], 0.01)
         self.assertLess(worst, 0.02)
+
+    def test_fractional_recordings_verify_and_write_only_after_a_pass(self):
+        probe, target = self.root / 'fractional.csv', self.root / 'profile.json'
+        fractional_recording(probe, self.profile)
+        bounds, rows, touches = e.read_probe(probe)
+        result = e.check_probe(self.profile, bounds, rows, touches)
+        self.assertTrue(result['fractional'])
+        self.assertLess(result['median_error'], 0.01)
+        target.write_bytes(PROFILE.read_bytes())
+        args = ['export-profile.py', '--check', str(probe), '--profile', str(target), '--write']
+        with mock.patch('sys.argv', args), contextlib.redirect_stdout(io.StringIO()):
+            e.main()
+        driver = json.loads(target.read_text())['driver']
+        self.assertEqual(driver['deltas'], 'fractional')
+        self.assertEqual(driver['event_rate_hz'], 123.4)
+        self.assertEqual(driver['counts_per_inch'], self.profile['driver']['counts_per_inch'])
+        before = target.read_bytes()
+        fractional_recording(probe, self.profile, gain_bias=1.3)
+        with mock.patch('sys.argv', args), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            e.main()
+        self.assertEqual(target.read_bytes(), before)
 
     def test_bursty_counts_like_the_attached_driver_fail(self):
         result, passed, worst = self.check(burst=0.6)

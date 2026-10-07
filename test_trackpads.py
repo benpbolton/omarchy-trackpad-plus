@@ -1024,6 +1024,41 @@ class TrackpadTests(unittest.TestCase):
         self.assertNotIn('accel_profile', line)
         self.assertIn('tap_to_click = true', line)
 
+    def test_new_imported_interface_exposes_native_fallback_and_reapply_recovery(self):
+        state = self.imported_state()
+        group = state['devices']['apple']
+        group['settings'].update(scroll_progressive=True, scroll_curve=dict(m.DEFAULT_SCROLL_CURVE))
+        original = copy.deepcopy(group['settings']['imported_curve']['devices'])
+        m.save(state)
+        added = 'apple-inc.-magic-trackpad-2'
+        view, _ = self.run_main(group['names'] + [added], 'state')
+        saved = json.loads(m.STATE.read_text())
+        lines = m.lua_for(saved['devices']).splitlines()
+        fallback = next(line for line in lines if '"' + added + '"' in line)
+        self.assertNotIn('accel_profile', fallback)
+        self.assertNotIn('scroll_points', fallback, 'custom scrolling must not be attached to a native fallback')
+        row = next(row for row in view['devices'] if row['id'] == 'apple')
+        self.assertEqual(row['imported_missing_interfaces'], [added])
+        for name in original:
+            line = next(line for line in lines if '"' + name + '"' in line)
+            self.assertIn('accel_profile = "custom ', line)
+            self.assertIn('scroll_points = "' + m.scroll_profile(m.DEFAULT_SCROLL_CURVE), line)
+        with patch.object(m, 'hypr', side_effect=self.compositor):
+            request = {'profile': 'imported', 'curve': m.DEFAULT_CURVE, 'imported': self.reference()}
+            with self.assertRaisesRegex(ValueError, added):
+                m.change(saved, 'apple', 'pointer_feel', request)
+            units = {name: 47.6 for name in saved['devices']['apple']['names']}
+            measured = m.change(saved, 'apple', 'units_per_mm', units)
+            recovered = m.change(measured, 'apple', 'pointer_feel', request)
+        final = recovered['devices']['apple']
+        self.assertIn(added, final['settings']['imported_curve']['devices'])
+        for name, curve in original.items():
+            self.assertEqual(final['settings']['imported_curve']['devices'][name], curve)
+        self.assertEqual(m.snapshot(recovered, {'apple': {}})['devices'][0]['imported_missing_interfaces'], [])
+        recovered_line = next(line for line in m.lua_for(recovered['devices']).splitlines() if '"' + added + '"' in line)
+        self.assertIn('accel_profile = "custom ', recovered_line)
+        self.assertIn('scroll_points = "' + m.scroll_profile(m.DEFAULT_SCROLL_CURVE), recovered_line)
+
     def test_disconnected_refresh_keeps_materialized_import_and_undo_history(self):
         state = self.imported_state()
         group = state['devices']['apple']

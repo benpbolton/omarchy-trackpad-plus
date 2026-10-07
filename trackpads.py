@@ -380,7 +380,9 @@ def lua_for(groups):
                         value = curve_profile(settings.get('curve', DEFAULT_CURVE),
                                               group.get('curve_calibration', {}).get(name))
                 fields.append(f'{key} = {json.dumps(value)}')
-            if group['settings'].get('accel_profile') == 'custom':
+            if group['settings'].get('accel_profile') == 'custom' and (
+                    not imported_active(group['settings'])
+                    or name in group['settings']['imported_curve']['devices']):
                 scroll = group['settings']
                 points = scroll_profile(scroll.get('scroll_curve', DEFAULT_SCROLL_CURVE)) if scroll.get('scroll_progressive') else IDENTITY_SCROLL
                 fields.append('scroll_points = ' + json.dumps(points))
@@ -882,6 +884,9 @@ def snapshot(state, live, monitor=None):
         group = copy.deepcopy(state['devices'][key])
         group['connected'] = key in live
         settings = group['settings']
+        if imported_active(settings):
+            group['imported_missing_interfaces'] = [
+                name for name in group['names'] if name not in settings['imported_curve']['devices']]
         if monitor and imported_active(settings):
             # The curve was converted for one Hyprland scale; a new scale needs a fresh Apply.
             imported = settings['imported_curve']

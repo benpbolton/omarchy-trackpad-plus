@@ -134,7 +134,7 @@ def read_probe(path):
             bounds = [float(v) for v in fields[1:5]]
         elif fields[0] == 'P':
             t, _, x, y, _, _, ux, uy, uxd, uyd = map(float, fields[1:11])
-            rows.append((t, x, y, ux, uy, uxd != round(uxd) or uyd != round(uyd)))
+            rows.append((t, x, y, uxd, uyd, uxd != round(uxd) or uyd != round(uyd)))
         elif fields[0] == 'N':
             touches.append((float(fields[1]), int(fields[4]), float(fields[6]), float(fields[7]),
                             float(fields[8]), float(fields[9])))

@@ -29,6 +29,7 @@ FocusScope {
   property string profilesDirectory: ""
   property string profilesStatus: ""
   property bool drift: false
+  property var missingInterfaces: []
   readonly property bool custom: draft.profile === "custom"
   readonly property bool imported: draft.profile === "imported"
   readonly property var importedRow: imported && draft.imported ? rowFor(draft.imported) : null
@@ -96,6 +97,7 @@ FocusScope {
   Keys.onEscapePressed: backRequested()
 
   component Label: Text {
+    textFormat: Text.PlainText
     color: editor.foreground
     font.family: editor.fontFamily
     font.pixelSize: 13 * editor.uiScale
@@ -110,6 +112,7 @@ FocusScope {
     padding: 8 * editor.uiScale
     contentItem: Text {
       text: control.text
+      textFormat: Text.PlainText
       font: control.font
       color: editor.foreground
       horizontalAlignment: Text.AlignHCenter
@@ -403,6 +406,16 @@ FocusScope {
       spacing: 8 * editor.uiScale
       visible: editor.imported
       Label {
+        objectName: "importedIncomplete"
+        visible: editor.saved.profile === "imported" && editor.missingInterfaces.length > 0
+        width: parent.width
+        text: "No converted curve for: " + editor.missingInterfaces.join(", ")
+          + ". These interfaces keep native tracking and scrolling; progressive scrolling waits for Re-apply. "
+          + "Provide their sensor resolution (see the profile setup instructions), then reapply the profile."
+          + (!editor.saved.imported || !editor.rowFor(editor.saved.imported) ? " Restore the source profile file first." : "")
+        font.pixelSize: 11 * editor.uiScale
+      }
+      Label {
         visible: editor.drift && editor.saved.profile === "imported"
         width: parent.width
         objectName: "importedDrift"
@@ -413,9 +426,9 @@ FocusScope {
       }
       Action {
         objectName: "reapplyProfile"
-        visible: editor.drift && editor.saved.profile === "imported" && !!editor.saved.imported && !!editor.rowFor(editor.saved.imported)
+        visible: (editor.drift || editor.missingInterfaces.length > 0) && editor.saved.profile === "imported" && !!editor.saved.imported && !!editor.rowFor(editor.saved.imported)
         width: parent.width
-        text: "Re-apply for this display"
+        text: editor.missingInterfaces.length ? "Re-apply for all interfaces" : "Re-apply for this display"
         enabled: !editor.busy
         onClicked: editor.reapply()
       }
