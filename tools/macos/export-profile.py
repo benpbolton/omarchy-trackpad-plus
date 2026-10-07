@@ -148,7 +148,9 @@ def check_probe(profile, bounds, rows, touches):
     f = pp.apple_function(pp.apple_parameters(profile))
     driver = dict(profile['driver'])
     inside = lambda row: bounds[0] + 0.5 < row[1] < bounds[2] - 1 and bounds[1] + 0.5 < row[2] < bounds[3] - 1
-    gaps = sorted(b[0] - a[0] for a, b in zip(rows, rows[1:]) if b[0] - a[0] < 0.03)
+    gaps = sorted(b[0] - a[0] for a, b in zip(rows, rows[1:]) if 0 < b[0] - a[0] < 0.03)
+    if not gaps:
+        raise ValueError('The probe contains no usable positive event timing; record again.')
     driver['event_rate_hz'] = round(1 / gaps[len(gaps) // 2], 1)
     fractional = any(r[5] for r in rows)
     # 1. Every event against IOHIDPointerAccelerator: the curve and its constants.
@@ -158,12 +160,14 @@ def check_probe(profile, bounds, rows, touches):
             px, py = pp.apple_event(f, b[3], b[4], (b[0] - a[0]) * 1000, driver)
             errors.append(abs(math.hypot(b[1] - a[1], b[2] - a[2]) / math.hypot(px, py) - 1) * 100)
     errors.sort()
+    if not errors:
+        raise ValueError('No usable movement events were recorded inside the selected display; record again there.')
     # 2. Seven-event windows of steady motion against the static curve libinput will get. The
     #    delta model that best reproduces them is kept; whole counts allow ideal or integer.
     windows = []
     for k in range(6, len(rows)):
         segment = rows[k - 6:k + 1]
-        if all(b[0] - a[0] < 0.012 for a, b in zip(segment, segment[1:])) and all(map(inside, segment)):
+        if all(0 < b[0] - a[0] < 0.012 for a, b in zip(segment, segment[1:])) and all(map(inside, segment)):
             seconds = segment[-1][0] - segment[0][0]
             counts = sum(math.hypot(r[3], r[4]) for r in segment[1:])
             moved = sum(math.hypot(b[1] - a[1], b[2] - a[2]) for a, b in zip(segment, segment[1:]))
@@ -202,6 +206,7 @@ def report_check(result):
           f"{result['events']} events ({result['within_half_percent']:.0%} within 0.5 %).")
     if result['touch_counts_per_inch']:
         print(f"Touch positions: {result['touch_counts_per_inch']:.1f} counts per inch on Apple's own scale.")
+    print('Physical counts per inch remain an input assumption; this check does not calibrate them.')
     models = list(result['fits'])
     print('Static curve vs measured strokes, measured ÷ model (finger mm/s, windows):')
     print('              windows  ' + '  '.join(f'{model:>10}' for model in models))
@@ -236,7 +241,10 @@ def main():
         if not args.profile:
             raise SystemExit('--check needs --profile PROFILE.json')
         profile = pp.load_profile(args.profile.read_bytes())
-        result = check_probe(profile, *read_probe(args.check))
+        try:
+            result = check_probe(profile, *read_probe(args.check))
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         passed, worst, trusted = report_check(result)
         if args.write and passed:
             date = datetime.date.today().isoformat()

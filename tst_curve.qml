@@ -23,6 +23,7 @@ Rectangle {
     name: "CurveEditor"
     when: windowShown
     function init() {
+      editor.kind = "pointer"
       editor.saved = {profile: "adaptive", curve: Curve.defaults()}
       editor.gainMaximum = 3.5
       editor.busy = false
@@ -52,6 +53,40 @@ Rectangle {
       editor.gainMaximum = 1
       verify(editor.curveExceedsRange)
       compare(editor.draft.curve.fast, 3)
+    }
+    function test_scroll_preset_and_controls_ignore_pointer_scale() {
+      editor.kind = "scroll"
+      editor.saved = {profile: "mac", curve: Curve.scrollDefaults()}
+      editor.begin()
+      for (var i = 0; i < 3; i++) {
+        editor.gainMaximum = [0.1, 1, 3][i]
+        editor.choose("mac")
+        compare(editor.draft.curve.precision, 1)
+        compare(editor.draft.curve.fast, 2)
+        compare(findChild(editor, "curveSpinner3").to, 100000)
+        var plot = findChild(editor, "curvePlot")
+        compare(plot.py(10), plot.topInset)
+        editor.adjust(3, 12)
+        compare(editor.draft.curve.fast, 10)
+      }
+      compare(applied.count, 0)
+    }
+    function test_mac_inspired_stays_optional_and_uses_pointer_scale() {
+      compare(editor.draft.profile, "adaptive")
+      compare(applied.count, 0)
+      editor.gainMaximum = 1
+      mouseClick(findChild(editor, "profileChoice-mac"))
+      compare(editor.draft.profile, "mac")
+      compare(editor.draft.curve.fast, 1)
+      verify(findChild(editor, "curvePlot").visible)
+      compare(applied.count, 0, "selecting a preset changes only the draft")
+      mouseClick(findChild(editor, "applyCurve"))
+      compare(applied.count, 1)
+      compare(applied.signalArguments[0][0].profile, "mac")
+      editor.profiles = profileRows()
+      editor.choose("imported")
+      compare(editor.draft.profile, "imported")
+      verify(!findChild(editor, "curvePlot").visible)
     }
     function test_failed_save_is_not_labelled_applied() {
       editor.settingsError = "Compositor unavailable"
@@ -305,7 +340,7 @@ Rectangle {
     }
     function test_profile_choices_fit_with_custom_last() {
       var right = 0
-      for (var id of ["adaptive", "flat", "imported", "custom"]) {
+      for (var id of ["adaptive", "mac", "flat", "imported", "custom"]) {
         var choice = findChild(editor, "profileChoice-" + id)
         verify(choice.width > 60)
         var left = choice.mapToItem(editor, 0, 0).x

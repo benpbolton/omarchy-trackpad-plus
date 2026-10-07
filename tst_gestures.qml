@@ -92,6 +92,48 @@ Item {
       mouseClick(overview)
       compare(editor.draft.overview, false)
     }
+    function test_mac_vertical_swipes_disable_overview_on_enable() {
+      var fullscreen = findChild(editor, "gestureFullscreenUp")
+      var scratchpad = findChild(editor, "gestureScratchpadDown")
+      verify(fullscreen.enabled)
+      verify(scratchpad.enabled)
+      mouseClick(fullscreen)
+      compare(editor.draft.fullscreen_up, true)
+      mouseClick(scratchpad)
+      compare(editor.draft.scratchpad_down, true)
+      editor.load({enabled: true, fingers: 4, distance: 300, invert: false, overview: true})
+      compare(editor.draft.fullscreen_up, false)
+      mouseClick(fullscreen)
+      compare(editor.draft.fullscreen_up, true)
+      compare(editor.draft.overview, false)
+      mouseClick(findChild(editor, "gestureApply"))
+      compare(applySpy.signalArguments[0][0].fullscreen_up, true)
+      compare(applySpy.signalArguments[0][0].overview, false)
+    }
+    function test_overview_and_swipe_off_clear_vertical_actions() {
+      editor.hymission = {available: true}
+      editor.load({enabled: true, fingers: 4, distance: 300, invert: false,
+                   fullscreen_up: true, scratchpad_down: true})
+      mouseClick(findChild(editor, "gestureOverview"))
+      compare(editor.draft.overview, true)
+      compare(editor.draft.fullscreen_up, false)
+      compare(editor.draft.scratchpad_down, false)
+      mouseClick(findChild(editor, "gestureApply"))
+      compare(applySpy.signalArguments[0][0].fullscreen_up, false)
+      compare(applySpy.signalArguments[0][0].scratchpad_down, false)
+      editor.load({enabled: true, fingers: 3, distance: 300, invert: false,
+                   fullscreen_up: true, scratchpad_down: true})
+      mouseClick(findChild(editor, "gestureEnable"))
+      compare(editor.draft.enabled, false)
+      compare(editor.draft.fullscreen_up, false)
+      compare(editor.draft.scratchpad_down, false)
+      verify(!findChild(editor, "gestureFullscreenUp").enabled)
+      verify(!findChild(editor, "gestureScratchpadDown").enabled)
+      mouseClick(findChild(editor, "gestureApply"))
+      compare(applySpy.signalArguments[1][0].enabled, false)
+      compare(applySpy.signalArguments[1][0].fullscreen_up, false)
+      compare(applySpy.signalArguments[1][0].scratchpad_down, false)
+    }
     function test_unsupported_overview_explains_compatibility_and_allows_turning_off() {
       editor.hymission = {available: false, supported: false, message: "HyMission overview is unavailable on ARM64"}
       compare(findChild(editor, "hymissionInfo").text, "HyMission compatibility ↗")

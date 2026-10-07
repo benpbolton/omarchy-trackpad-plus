@@ -6,6 +6,21 @@ Fine-grained, per-device trackpad controls and pointer-feel tuning for
 [Omarchy](https://omarchy.org). Independently maintained by David Fano;
 not an official Omarchy project or endorsed by the Omarchy team.
 
+## New in 2026.10.05.0
+
+- **Apple palm rejection:** adjust the contact-size threshold for the supported
+  Magic Trackpad 0265 in **Apple → Pointer → Palm rejection**. Install the
+  optional administrator helper first; applied changes take effect at the next
+  login. [Setup and usage](#apple-palm-rejection).
+- **Optional Apple typing guard:** pause the external Apple trackpad while
+  typing, even when native typing protection is unavailable. Its user service
+  starts at desktop login after you explicitly install and enable it.
+  [Install, verify, update, and remove the guard](#optional-apple-typing-guard).
+
+These are separate features: palm rejection filters large contacts, while the
+typing guard temporarily disables the pad. Neither requires changing your
+saved pointer curve or scrolling speed. See the [release notes](RELEASE_NOTES.md).
+
 ## Project history
 
 Trackpad Plus for Omarchy began as a fork of Andrew Kent’s
@@ -34,7 +49,10 @@ gestures apply across trackpads.
   configure tapping, typing protection, and two-finger right click. System and
   Flat profiles also expose **Pointer Speed**.
 - **Scrolling:** adjust **Scroll Speed** and **Natural Scrolling** independently
-  of the pointer curve.
+  of the pointer curve. Optional **Progressive Scrolling** applies a separate
+  acceleration curve so slow swipes stay precise and faster flicks cover more
+  distance. It requires a custom pointer profile (Mac-inspired or Custom);
+  turning it on from System or Flat switches pointer feel to Mac-inspired.
 - **Gestures:** configure horizontal workspace swipes and an optional upward
   swipe for the workspace overview. Test the overview before applying gestures.
 
@@ -42,21 +60,22 @@ gestures apply across trackpads.
 
 - Enable or disable the selected trackpad.
 - Scroll speed (0.01–1.00, in 0.01 steps) with a per-device scale, and pointer speed (−1.0–1.0).
-- Pointer feel: System (adaptive), Flat, macOS, and Custom profiles. **macOS** applies a
-  Mac's own trackpad acceleration, with the same Tracking speed slider.
+- Pointer feel: System (adaptive), Flat, Mac-inspired, macOS, and Custom profiles.
+- Progressive scrolling with a Mac-inspired or Custom scroll acceleration curve.
 - Visual acceleration editor with draggable precision, acceleration start/end, and fast-swipe
-  handles, keyboard adjustment, target practice, and Restore previous.
+  handles, keyboard adjustment, target practice (pointer only), and Restore previous.
 - Natural scrolling, tap to click, disable while typing, and clickfinger behavior.
 - Keyboard navigation through device selection, sliders, and switches.
 
 Select a detected trackpad at the top. The **Enable trackpad** switch inside the gear menu turns
 that trackpad on or off. **Natural Scrolling** controls scroll direction;
 **Tap to Click** enables tapping instead of pressing; **Disable While Typing**
-reduces accidental input while typing; **Two-Finger Right Click** enables a
+requests native typing protection where the driver supports it (external Apple
+Magic Trackpads need the optional guard below); **Two-Finger Right Click** enables a
 secondary click by pressing with two fingers.
 
-The sliders and toggles save as you use them. Pointer-curve edits stay in
-preview until you press **Apply & try**.
+The sliders and toggles save as you use them. Pointer-curve and scroll-curve
+edits stay in preview until you press **Apply & try**.
 
 The footer shows the installed version, starting with **2026.09.13.0**. Releases
 use **YYYY.MM.DD.N**: release date followed by a revision starting at 0 and
@@ -80,6 +99,92 @@ word. The part number is matched against the whole name, so a Synaptics mouse or
 any name carrying a suffix cannot match it. The separate TrackPoint is excluded.
 Other trackpads whose names omit both words may still need an explicit detection
 rule.
+
+## Apple palm rejection
+
+Select **Apple → Pointer → Palm rejection** for an external Apple Magic Trackpad
+with product ID `0265` (the 2015 model, including its alternate vendor ID).
+The control is shown only when this supported model is connected. Built-in Apple
+trackpads, newer Magic Trackpad models, and Dell trackpads retain their own defaults.
+Both Bluetooth and USB identities receive the same chosen threshold. Two units of
+this same model share it; the setting is model-specific, not tied to a serial number.
+
+Choose **System default** or **Custom**, edit the contact-size threshold, then
+press **Apply palm settings**. Lower values reject smaller contacts; overly low
+values can interfere with fingers and gestures. The system default for this model
+is 900. A value of 700 separated one user's measured palm and finger contacts;
+calibrate your own touches rather than assuming it works for everyone.
+
+Native palm settings need administrator authorization and take effect after
+logging out and back in. The panel reports when the saved change is pending.
+It never ends the desktop session automatically. **System default** removes the
+managed threshold overrides, so subsequent driver updates provide the default.
+
+Install the optional, root-owned writer from a trusted checkout before using Apply:
+
+```sh
+sudo install -Dm644 palm-system.py /usr/local/libexec/trackpad-plus-palm.py
+```
+
+Run the command from a trusted checkout or the installed plugin directory at
+`${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/davefano.trackpad-plus`.
+Then open the panel, select **Apple → Pointer → Palm rejection**, choose
+**System default** or a **Custom** threshold, and press **Apply palm settings**.
+Authorize the change and log out and back in when ready. A pending message means
+the saved threshold is awaiting that new desktop session.
+
+The writer accepts only `default` or a bounded numeric threshold for this Apple
+model. It changes only `/etc/libinput/local-overrides.quirks`, preserves unrelated
+sections, refuses conflicting manual palm rules, and creates root-owned backups
+alongside that file before each change. USB and Bluetooth rules are saved together.
+The earlier local 700 trial is adopted without duplicate rules. No raw touch or
+keyboard data is recorded by this control. Palm rejection and the optional
+typing guard below are separate features.
+
+## Optional Apple typing guard
+
+The external Apple Magic Trackpad tested on this project does not support
+libinput's native disable-while-typing feature. The panel can save the switch as
+on without the driver suppressing touches. Built-in touchpads may support it,
+but keyboard pairing also matters; an external keyboard does not normally pause
+an internal touchpad. See [libinput's typing protection documentation](https://wayland.freedesktop.org/libinput/doc/latest/palm-detection.html#disable-while-typing).
+
+`trackpad-typing-guard.py` provides a separate, optional guard for the saved
+`apple` device group. It pauses those Apple interfaces during ordinary typing
+on physical keyboards and resumes them about 0.55 seconds after typing stops.
+It honors **Enable trackpad** and **Disable While Typing** in Trackpad Plus.
+Ctrl, Alt, and Super shortcuts do not trigger the pause. The guard reads keyboard
+events without recording typed text; its status contains only counts and flags.
+The desktop user needs read access to the keyboard devices under `/dev/input`.
+It does not protect Dell or separately saved built-in Apple device groups.
+
+Run these commands from a trusted checkout (or the installed plugin directory),
+after the Apple trackpad has appeared in the panel's saved settings:
+
+```sh
+install -Dm644 trackpad-typing-guard.py "$HOME/.local/lib/trackpad-typing-guard.py"
+install -Dm644 trackpad-typing-guard.service "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/trackpad-typing-guard.service"
+systemctl --user daemon-reload
+systemctl --user enable --now trackpad-typing-guard.service
+python3 "$HOME/.local/lib/trackpad-typing-guard.py" status
+```
+
+`enable --now` starts protection now and at future desktop logins. The service's
+`[Install]` section attaches it to `graphical-session.target`; merely starting a
+service without enabling it loses protection after logout or reboot. No
+administrator authorization is needed if input-device access already exists.
+A running guard should report a nonzero `keyboards` count. Verify that the pointer
+stays still while typing and moves again afterward; `pauses` and `resumes` should
+increase. `protection: true` alone does not establish that typing was detected.
+
+Repeat the installation commands to update the optional guard, then run
+`systemctl --user restart trackpad-typing-guard.service`. Plugin updates do not
+update its separate copy automatically. To undo the installation, run
+`systemctl --user disable --now trackpad-typing-guard.service`, remove the two
+files installed above, and run `systemctl --user daemon-reload`. Stopping the
+guard restores the saved Apple enabled state. The guard was physically verified
+on a Dell XPS with an external Apple Magic Trackpad; other setups need their own
+typing test.
 
 ## Workspace gestures
 
@@ -169,8 +274,22 @@ images and window titles are not written to files, logs, or network services.
 Capture is limited to visible thumbnails and the current window page, with two simultaneous requests and a
 per-card deadline. Large source windows can still require large graphics buffers.
 
-Gesture block schemas 2–6 remain readable and restorable. An explicit edit
-writes schema 7 with the selected provider; this is separate from the pointer
+For optional vertical actions, open **Gestures**, enable **Workspace swipe**,
+choose three or four fingers, and turn on **Swipe up for fullscreen** or
+**Swipe down for scratchpad**. Press **Apply gestures** to save. Up toggles the
+active window's fullscreen state; down toggles Hyprland's special workspace
+named `scratchpad`. Put windows in that special workspace using your existing
+Hyprland bindings. Both actions are off by default and use the workspace swipe's
+finger count. Enabling either turns overview off; enabling overview clears both.
+Turning workspace swipe off also clears these actions. Existing manual vertical
+bindings must be managed in your Hyprland config before enabling these options.
+
+Palm rejection remains the separate, model-specific **Apple → Pointer** control
+for supported external Magic Trackpads. Built-in Apple SPI/MTP palm tuning is
+not included; those devices require separate hardware validation.
+
+Gesture block schemas 2–7 remain readable and restorable. An explicit edit
+writes schema 8 with the selected provider and optional vertical actions; this is separate from the pointer
 settings schema. With Trackpad Plus selected, Hyprland 0.56.2 gesture callbacks
 open the overview as soon as the upward swipe is recognized, without waiting for
 finger release. Reversing or cancelling the swipe afterward does not undo the
@@ -296,9 +415,30 @@ Shift+Up/Down uses **1.00** steps. The setting is saved for that device group.
 Upgrading preserves effective scroll speeds: existing values up to 1 keep a 1×
 scale, while values above 1 receive a matching scale. Schema 4 stores the
 effective `scroll_factor` and separate `scroll_scale`; only the effective factor
-is emitted to Hyprland. Schema 5 adds macOS profiles without changing existing
-settings; earlier releases refuse schema 5. Back up both plugin and settings
+is emitted to Hyprland. Schema 5 stores saved sensor calibration; schema 6 adds optional macOS profiles
+without recalibrating existing settings. Earlier backends refuse schema 6. Back up both plugin and settings
 before upgrading; downgrading requires restoring the matching settings backup.
+
+## Progressive scrolling
+
+Open **Scrolling** and turn on **Progressive Scrolling** to make faster
+two-finger flicks travel farther. It is off by default, so existing scrolling
+stays linear. **Scroll Speed** and **Device scale** still control the overall
+scroll speed. The default curve adds a **1× multiplier for slow movement** and
+smoothly rises to **2× for fast flicks**, independent of Device scale.
+
+Use **Scroll acceleration** to choose **Mac-inspired** or edit a **Custom**
+curve. Its chart and gain controls have a separate **10× maximum**. Press
+**Apply & try** to save; **Restore previous** swaps back to the last applied
+scroll curve for that device. Choosing **Mac-inspired** restores the 1×–2×
+shape without changing Scroll Speed or Device scale.
+
+Progressive scrolling requires libinput's custom acceleration profile.
+Enabling it while the pointer uses **System** or **Flat** also selects the
+Mac-inspired pointer curve. You can then edit the pointer curve separately.
+Choosing **System** or **Flat** again disables progressive scrolling. Turning
+**Progressive Scrolling** off restores linear scrolling while keeping your
+pointer curve and saved scroll curve.
 
 ## How pointer feel works
 
@@ -338,14 +478,21 @@ that device, including after a restart. Applied settings persist across shell
 restarts and Hyprland reloads. Escape returns to the main panel.
 
 **System** uses libinput adaptive acceleration with your saved Pointer Speed.
-**Flat** uses a constant response with that speed setting. In Custom and
+**Flat** uses a constant response with that speed setting. In Custom, Mac-inspired and
 macOS mode, the curve replaces Pointer Speed; its saved value is retained
 for when you return to System or Flat.
 
 Existing curves change only when you explicitly apply an edit or profile. The
 editor does not add scroll momentum or change gestures or haptic feedback.
-Settings saved with the former **Mac-inspired** preset keep their exact curve and
-appear as Custom.
+**Mac-inspired** remains available as an experimental starting preset. Its saved
+curves and Undo history retain their existing response.
+
+Existing saved Custom and Mac-inspired curves retain their original spacing.
+An explicit **Apply & try** now saves per-interface sensor calibration when the
+device can be identified uniquely. This corrects high-resolution tracking without
+changing existing curves on upgrade. Ambiguous, duplicate, and unknown sensors
+keep the original spacing; System and Flat remain available. Calibration and
+Undo survive disconnection and later refreshes.
 
 <details>
 <summary>How the curve reaches libinput</summary>
@@ -359,16 +506,37 @@ Each custom curve is validated with the installed libinput library before it
 is applied or saved. Libinput accepts at most 64 points; Hyprland 0.56 does not
 report point-validation failures through `hyprctl eval`, so the compositor's
 response alone is insufficient. Custom profiles use an identity scroll curve
-before the separate scroll multiplier. Legacy three-handle curves preserve
+before the separate scroll multiplier, unless **Progressive Scrolling** is on.
+Then the same sampling writes a `scroll_points` curve independently of the
+pointer curve. Legacy three-handle curves preserve
 their intended shape during migration and appear as Custom.
+
+Newly applied Mac-inspired and Custom curves account for the trackpad sensor's
+resolution when it can be identified safely. Libinput's custom profile receives
+raw device units, so a 96 units/mm sensor uses 2.4× the sample spacing and a
+47 units/mm Magic Trackpad 2 uses 1.2×. Resolution comes from udev hwdb overrides
+(`EVDEV_ABS_00`) or known Apple USB/Bluetooth kernel values.
+
+**Existing saved curves keep their current feel after updating.** To try the
+correction, open the pointer curve editor, select Mac-inspired or Custom, and
+click Apply. Undo restores the previous curve and its original spacing.
+Calibration is saved separately for each interface, so disconnecting a trackpad
+or restarting Trackpad Plus does not change its saved response. Changing the
+Device scale setting still affects scrolling and the editor's range as before.
+
+Unknown sensors and ambiguous duplicate device names keep the original sample
+spacing. Resolution lookup requires a unique exact native device name. Hyprland's
+added `-N` suffix does not reliably identify a sensor, so Trackpad Plus never
+strips it or guesses its resolution. Newly discovered interfaces stay unscaled
+until a curve is explicitly applied to them.
 
 </details>
 
-## Use your Mac's trackpad feel
+## Experimental macOS pointer profiles
 
-**macOS** applies the acceleration curve macOS itself uses for a Mac's trackpad,
-converted for libinput so the cursor covers the same physical distance on the
-same display. There is nothing to tune except **Tracking speed**, which has the
+**macOS** offers an optional approximation derived from exported Apple
+acceleration parameters and converted for libinput. It targets physical cursor
+travel on the same display, with documented timing and hardware limits. There is nothing to tune except **Tracking speed**, which has the
 same ten stops as the slider in macOS System Settings and starts at the Mac's own
 setting.
 
@@ -395,15 +563,18 @@ hand.
 Good to know:
 
 - The conversion needs each trackpad's resolution in units per millimetre. It is
-  built in for the MacBook Pro 14" (M1 Pro or M1 Max) under Asahi Linux. For any
-  other trackpad, Apply names the interface; measure and save its resolution as
+  built in for the MacBook Pro 14" (M1 Pro or M1 Max) under Asahi Linux. Unique
+  sensor data or saved calibration can supply other known interfaces. Unknown
+  interfaces are named in the Apply error; measure and save their resolution as
   described in [tools/macos/README.md](tools/macos/README.md#trackpad-resolution).
 - The curve is converted for the built-in display's size and Hyprland scale. If the
   scale changes, the panel shows **Display scale changed** with **Re-apply**.
-- From 6 to 600 mm/s of finger speed, the result is within 2% of macOS for the
-  included profile. Stroke starts can still differ, because libinput times the
+- The contributor reports conversion error within 2% over 6–600 mm/s for the
+  included M1 Pro profile; this is not a guarantee for other hardware. Stroke starts can still differ, because libinput times the
   first movement after a pause differently from macOS; see
   [What a curve cannot copy](tools/macos/README.md#what-a-curve-cannot-copy).
+- This option affects pointer movement only. Existing progressive scrolling stays
+  independent; matching Apple's scrolling and inertia is separate work.
 - Profiles are read-only data in `${XDG_CONFIG_HOME:-~/.config}/trackpad-plus/profiles/`
   (at most 32 files). Each must be a regular file owned by you and not writable by
   others; the directory may be a Stow link. Applying stores the converted curve,
@@ -449,7 +620,7 @@ are separate from the per-device settings in the table.
 Requires Omarchy's Quickshell shell and Lua-based Hyprland configuration
 (tested with Hyprland 0.56.2), Python 3, libinput with custom acceleration support
 (`libinput.so.10`), `hyprctl`, and GNU `timeout` (coreutils). No elevated privileges
-are required. Older Hyprland configurations using `.conf` syntax are unsupported.
+are required for the standard controls; optional native palm settings use the administrator helper described above. Older Hyprland configurations using `.conf` syntax are unsupported.
 
 ```sh
 omarchy plugin add https://github.com/davefano/omarchy-trackpad-plus.git --enable
@@ -605,14 +776,19 @@ rules or application settings.
 ## Development and testing
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for the complete suite, architecture, and
-live verification checklist. The [release safety review](docs/safety-review.md)
-records tested failure cases and remaining compatibility limits. Report bugs through
+live verification checklist. Run `bash tools/check.sh portable` for the CI suite
+or `bash tools/check.sh host` for the complete automated Omarchy suite.
+The [release safety review](docs/safety-review.md) records tested failure cases
+and remaining compatibility limits; [MARKETPLACE.md](MARKETPLACE.md) tracks
+submission evidence and the listing draft. Report bugs through
 [GitHub Issues](https://github.com/davefano/omarchy-trackpad-plus/issues).
 
 ## Removal
 
 ```sh
 # If you enabled gesture management, first use Gestures → Restore original.
+# If you installed the optional typing guard, stop and disable it first:
+# systemctl --user disable --now trackpad-typing-guard.service
 trackpad_plugin="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/davefano.trackpad-plus"
 if test -f "$trackpad_plugin/overview-control.py"; then
   python3 "$trackpad_plugin/overview-control.py" stop

@@ -53,10 +53,14 @@ Sources: Apple's [IOHIDFamily-2115.140.4](https://github.com/apple-oss-distribut
    the speed — `(g·x)ⁿ`, not `g·xⁿ`. Tracking speeds between the stored notches interpolate
    every parameter linearly.
 
-For steady finger speed `v` (in/s), counts per event are `400·v/r`, so the cursor moves
-`T(v) = (96·r/67)·f(67·v/r)` points per second at event rate `r`. `pointer_profiles.py`
-implements each step; `test_pointer_profiles.py` checks it against a simulation of Apple's
-per-event code.
+For ideal continuous counts with both resolution and assumed count scale at
+400 per inch, let `q = min(r / report_rate, 1)`. The steady transfer is
+`T(v) = (96·r/(67·q))·f(67·q·v/r)` points per second at event rate `r` and
+finger speed `v` in inches/s. When `r` is at least the report rate, `q=1` and this
+reduces to the original expression. Integer and fractional counts need the
+per-event floor and carried-frame gaps as well. The converter models those
+separately; regression tests compare all three rates (60, 120, 123.4 Hz) with
+the event model. This verifies the mathematical model, not physical Mac parity.
 
 ## How Linux receives it
 
@@ -74,18 +78,26 @@ per-event code.
   speed per millisecond, the frame rate does not change the curve.
 
 The converter samples `T` as 64 points whose last two lie on Apple's tangent line, so
-libinput's extrapolation is exact up to the square-root knee, and scales points to pixels so
-the cursor covers the same physical distance on the same panel. For the included profile at
-tracking speed 0.875 and 98.65 units/mm, the libinput curve is within **1.8 % of macOS from 6 to 600 mm/s** (4.9 % at
-3–6 mm/s, 8.3 % at 1.5–3 mm/s; flicks above 800 mm/s run up to 8 % fast).
+libinput's extrapolation follows the modeled tangent until the square-root knee.
+Scaling targets comparable physical cursor travel on the same panel. The
+contributor reported **1.8% conversion error over 6–600 mm/s** for the included
+M1 Pro profile at tracking speed 0.875 and 98.65 units/mm, with larger errors
+outside that band. Other profiles, event-rate combinations and delta models
+have different approximation error; their conversion reports its own bands.
 
 ## What the check found on a MacBook Pro 14" (M1 Pro)
+
+These are contributor-reported measurements from the original M1 Pro setup;
+the Linux tests do not reproduce them on other hardware. Counts per physical
+inch remain an assumption derived from exported resolution metadata. The
+NSTouch comparison is a sanity check and does not calibrate that assumption;
+PASS and `--write` update event rate and delta model, not physical count scale.
 
 | Measurement | Result |
 | --- | --- |
 | Apple's accelerator, event by event | median error 0.03 % (1843 events) |
 | Pointer event rate | 123.4 Hz (not the 120 Hz `HIDPointerReportRate`) |
-| Counts | whole numbers at 400 per inch |
+| Counts | whole numbers; 400 per physical inch assumed |
 | Static curve vs real strokes, 15–254 mm/s | within ±1.4 % |
 
 **Why the probe avoids MultitouchSupport.** Reading raw frames through the private

@@ -99,13 +99,20 @@ class AppleCurveTests(unittest.TestCase):
         fast = [p.cursor_speed(self.f, 5, dict(self.profile['driver'], event_rate_hz=rate)) for rate in [120, 125]]
         self.assertLess(fast[1], fast[0])
 
+    def test_late_regular_events_match_apples_rate_clamp(self):
+        driver = dict(self.profile['driver'], event_rate_hz=60, report_rate_hz=120, deltas='integer')
+        # Ten counts each 60 Hz event, despite the driver's nominal 120 Hz report period.
+        expected = p.apple_event(self.f, 10, 0, 1000 / 60, driver)[0] * 60
+        self.assertAlmostEqual(expected, 256.3011933899454)
+        self.assertAlmostEqual(p.cursor_speed(self.f, 1.5, driver), expected)
+
     def test_static_models_match_simulated_steady_strokes(self):
         # Fractional events jitter evenly across one count; integer events carry remainders.
-        for model, finger in product(['fractional', 'integer'], [0.4, 1.3, 2.75, 9.0]):
-            driver = dict(self.profile['driver'], deltas=model)
+        for model, finger, rate in product(['fractional', 'integer'], [0.01, 0.04, 0.4, 1.3, 2.75, 9.0], [60, 120, 123.4]):
+            driver = dict(self.profile['driver'], deltas=model, event_rate_hz=rate)
             period = 1000 / driver['event_rate_hz']
             per_event = driver['counts_per_inch'] * finger / driver['event_rate_hz']
-            travelled, carried, waited, frames = 0.0, 0.0, 0.0, 2400
+            travelled, carried, waited, frames = 0.0, 0.0, 0.0, 12000
             for frame in range(frames):
                 waited += period
                 if model == 'fractional':
@@ -119,7 +126,7 @@ class AppleCurveTests(unittest.TestCase):
                     waited = 0.0
             simulated = travelled / (frames * period / 1000)
             self.assertAlmostEqual(simulated / p.cursor_speed(self.f, finger, driver), 1, delta=0.01,
-                                   msg=f'{model} at {finger} in/s')
+                                   msg=f'{model} at {finger} in/s, {rate} Hz')
 
 
 class ConversionTests(unittest.TestCase):
@@ -150,6 +157,31 @@ class ConversionTests(unittest.TestCase):
             expected = p.cursor_speed(f, speed / 25.4, driver) / 1000
             self.assertAlmostEqual(p.interpolate(result['step'], result['points'], units) / expected, 1, places=4)
 
+    def test_late_event_sampling_places_tail_on_the_correct_tangent(self):
+        driver = dict(profile()['driver'], event_rate_hz=60, deltas='ideal')
+        sample = profile(driver=driver)
+        result = p.convert(sample, 98.65, 1.0)
+        self.assertAlmostEqual(result['step'], 0.5067)
+        f = p.apple_function(p.apple_parameters(sample))
+        for speed in [400, 600, 770]:
+            counts = speed / 25.4 * driver['counts_per_inch'] / driver['event_rate_hz']
+            velocity = counts * 0.5  # 60 Hz reports are late against the nominal 120 Hz period.
+            expected = counts / velocity * p.apple_multiplier(f, velocity, driver) * 60 / 1000
+            actual = p.interpolate(result['step'], result['points'], speed * 98.65 / 1000)
+            self.assertAlmostEqual(actual / expected, 1, places=4)
+
+    def test_discrete_tail_samples_clear_the_tangent_after_rate_normalization(self):
+        for model, rate in product(['integer', 'fractional'], [60, 120, 123.4]):
+            driver = dict(profile()['driver'], deltas=model, event_rate_hz=rate)
+            value = profile(driver=driver)
+            result = p.convert(value, 98.65, 1)
+            # Both final samples must use the linear branch, including the lowest
+            # count in the fractional model's one-count jitter interval.
+            counts = 62 * result['step'] * 1000 / 98.65 / 25.4 * driver['counts_per_inch'] / rate
+            lowest_whole = math.floor(counts - (0.5 if model == 'fractional' else 0))
+            argument = lowest_whole * min(rate / driver['report_rate_hz'], 1) * p.FRAME_RATE / driver['resolution_dpi']
+            self.assertGreaterEqual(argument, p.apple_parameters(value)['tangent_linear'])
+
     def test_hyprland_scale_keeps_physical_travel(self):
         base = p.convert(profile(), 98.65, 1.0)
         scaled = p.convert(profile(), 98.65, p.px_per_point(p.mm_per_point(profile()), dict(PANEL, scale=4 / 3)))
@@ -175,8 +207,9 @@ class ConversionTests(unittest.TestCase):
         coarse = p.convert(profile(), 47.6, 1.0)
         fine = p.convert(profile(), 98.65, 1.0)
         self.assertAlmostEqual(coarse['step'] / fine['step'], 47.6 / 98.65, places=3)
-        # Whole counts put kinks into Apple's slow end that 64 points can only approximate.
-        for model, limit in [('integer', 3.5), ('fractional', 2)]:
+        # Whole counts and skipped zero-delta frames put kinks into Apple's slow
+        # end that 64 points can only approximate (3.82 % for this integer profile).
+        for model, limit in [('integer', 4), ('fractional', 2)]:
             result = p.convert(profile(driver=dict(profile()['driver'], deltas=model)), 98.65, 1.0)
             self.assertEqual(result['points'], sorted(result['points']))
             self.assertLessEqual(result['error_bands']['6-600'], limit)
@@ -236,6 +269,11 @@ class ValidationTests(unittest.TestCase):
         self.rejects(profile(display=dict(profile()['display'], pixels_wide=3024.0)), 'range')
         self.rejects(profile(source={'nested': {}}), 'range')
         self.rejects(profile(source={str(i): i for i in range(17)}), 'source')
+
+    def test_huge_json_integer_is_rejected_as_a_validation_error(self):
+        # JSON permits integers too large to convert to a float.
+        with self.assertRaisesRegex(ValueError, 'range'):
+            p.load_profile(json.dumps(profile(tracking_speed=10 ** 1000)).encode())
 
     def test_untrusted_bytes_are_bounded_and_finite(self):
         with self.assertRaisesRegex(ValueError, 'NaN'):

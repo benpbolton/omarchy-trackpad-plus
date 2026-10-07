@@ -13,7 +13,21 @@ import AppKit
 import Foundation
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-let recordSeconds = arguments.firstIndex(of: "--seconds").flatMap { Double(arguments[$0 + 1]) } ?? 30.0
+func usage(_ reason: String = "") -> Never {
+    FileHandle.standardError.write((reason + "\nUsage: trackpad-probe OUTPUT.csv [--seconds 1...300]\n").data(using: .utf8)!)
+    exit(2)
+}
+guard let outputPath = arguments.first, !outputPath.hasPrefix("--"),
+      arguments.count == 1 || (arguments.count == 3 && arguments[1] == "--seconds") else {
+    usage()
+}
+var recordSeconds = 30.0
+if arguments.count == 3 {
+    guard let seconds = Double(arguments[2]), seconds.isFinite, seconds >= 1, seconds <= 300 else {
+        usage("Recording duration must be finite and between 1 and 300 seconds.")
+    }
+    recordSeconds = seconds
+}
 let idleLimitSeconds = 180.0
 
 final class Log {
@@ -121,19 +135,18 @@ final class ProbeView: NSView {
     }
 }
 
-guard let outputPath = arguments.first, !outputPath.hasPrefix("--") else {
-    FileHandle.standardError.write("Usage: trackpad-probe OUTPUT.csv [--seconds N]\n".data(using: .utf8)!)
-    exit(2)
-}
 let output = URL(fileURLWithPath: outputPath)
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 NSEvent.isMouseCoalescingEnabled = false  // one row per HID event
 
-let screen = NSScreen.screens.first { screen in
+guard let screen = NSScreen.screens.first(where: { screen in
     let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
     return CGDisplayIsBuiltin(id) != 0
-} ?? NSScreen.main!
+}) ?? NSScreen.main,
+      let displayNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+    usage("A graphical desktop with an available display is required.")
+}
 let window = ProbeWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
 window.level = .mainMenu + 1
 window.acceptsMouseMovedEvents = true
@@ -141,7 +154,7 @@ let view = ProbeView(frame: NSRect(origin: .zero, size: screen.frame.size))
 window.contentView = view
 view.allowedTouchTypes = [.indirect]
 view.wantsRestingTouches = true
-let bounds = CGDisplayBounds(CGMainDisplayID())
+let bounds = CGDisplayBounds(displayNumber.uint32Value)
 let header = [
     "# trackpad-plus probe 2",
     "# screen_points,\(screen.frame.width),\(screen.frame.height),backing_scale,\(screen.backingScaleFactor)",

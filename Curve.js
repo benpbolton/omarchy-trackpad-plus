@@ -1,6 +1,18 @@
 // Editor gain controls are sampled as output velocities for libinput.
 function defaults() { return { precision: 0.3, start: 0.8, end: 2.8, fast: 1.6 } }
 
+// Slow two-finger motion stays near 1:1; faster flicks cover more distance.
+function scrollDefaults() { return { precision: 1.0, start: 0.5, end: 2.2, fast: 2.0 } }
+
+function scalePreset(curve, maximum) {
+  var factor = Math.min(1, maximum / curve.fast)
+  curve.precision = Math.max(0.01, Number((curve.precision * factor).toFixed(6)))
+  curve.fast = Number((curve.fast * factor).toFixed(6))
+  return curve
+}
+
+function presetForScale(maximum) { return scalePreset(defaults(), maximum) }
+
 function copy(value) { return JSON.parse(JSON.stringify(value)) }
 
 // Preserve the shape of saved three-handle curves when opening the new editor.
@@ -49,8 +61,8 @@ function adjust(curve, handle, value, precise, maximum) {
 }
 
 function fromSettings(settings) {
-  // The former Mac-inspired preset was a plain curve; it is edited as Custom.
-  var preset = settings.curve_preset === "imported" ? "imported" : "custom"
+  // Keep both the Mac-inspired preset and optional imported macOS profile.
+  var preset = settings.curve_preset === "imported" || settings.curve_preset === "mac" ? settings.curve_preset : "custom"
   var feel = {
     profile: settings.accel_profile === "custom" ? preset : settings.accel_profile,
     curve: normalize(settings.curve || defaults())
@@ -61,21 +73,21 @@ function fromSettings(settings) {
 }
 
 // Profiles that replace libinput's adaptive/flat response, so Pointer Speed does not apply.
-// "mac" remains for undo records saved by earlier releases.
+// Both built-in presets and imported profiles use custom libinput curves.
 function usesCurve(profile) { return profile === "mac" || profile === "custom" || profile === "imported" }
 
 function label(feel) {
   if (feel.profile === "imported") return "macOS · " + (feel.imported && feel.imported.name || "profile")
-  return ({ adaptive: "System", flat: "Flat" })[feel.profile] || "Custom"
+  return ({ adaptive: "System", flat: "Flat", mac: "Mac-inspired" })[feel.profile] || "Custom"
 }
 
-// The backend takes a file reference and tracking speed, or for undo the converted curve itself.
+// Fresh Apply converts the file again; explicit pointer_restore sends its saved record separately.
 function request(feel) {
   var value = { profile: feel.profile, curve: copy(feel.curve) }
   if (feel.profile === "imported") {
     var imported = feel.imported
-    value.imported = imported.devices ? copy(imported) : { file: imported.file, sha256: imported.sha256 }
-    if (!imported.devices && imported.tracking_speed !== undefined) value.imported.tracking_speed = imported.tracking_speed
+    value.imported = { file: imported.file, sha256: imported.sha256 }
+    if (imported.tracking_speed !== undefined) value.imported.tracking_speed = imported.tracking_speed
   }
   return value
 }
@@ -91,4 +103,11 @@ function same(a, b) {
   return key(a) === key(b)
 }
 
-if (typeof module !== "undefined") module.exports = { defaults, copy, normalize, gain, points, sampledGain, adjust, fromSettings, usesCurve, label, request, same }
+function fromScrollSettings(settings) {
+  return {
+    profile: settings.scroll_curve_preset || "mac",
+    curve: normalize(settings.scroll_curve || scrollDefaults())
+  }
+}
+
+if (typeof module !== "undefined") module.exports = { defaults, scrollDefaults, presetForScale, copy, normalize, gain, points, sampledGain, adjust, fromSettings, fromScrollSettings, usesCurve, label, request, same }

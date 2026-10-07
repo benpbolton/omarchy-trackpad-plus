@@ -15,11 +15,20 @@ function context() {
       { id: 'apple', label: 'Apple', connected: true, names: ['apple'], settings: { ...settings } },
       { id: 'dell', label: 'Dell', connected: true, names: ['dell'], settings: { ...settings, sensitivity: 0.3 } }
     ],
-    selectedDevice: 'apple', pendingActions: [], settingsError: '',
+    selectedDevice: 'apple', pendingActions: [], settingsError: '', deviceSettingsOpen: false,
+    editingCurve: false, gestureEditor: {activeFocus: false},
     editGeneration: 0, stateGeneration: 0, refreshPending: false,
     actionProc: { running: false }, stateProc: { running: false }, backend: 'trackpads.py',
+    palmProc: { running: false }, palmBackend: 'palm.py',
+    palmEditor: { settings: {supported: false}, activeFocus: false, busy: false, dirty: false,
+      error: '', resetDraft() { this.dirty = false }, acceptSettings(value) { this.settings = value },
+      beginEditing() { this.activeFocus = true } },
     Model: require('./Model.js'),
-    Curve: require('./Curve.js'), previousFeels: {}, curveEditor: {},
+    Curve: require('./Curve.js'), previousFeels: {}, previousScrollFeels: {},
+    curveKind: 'pointer', scrollProgressive: false, profilesRequest: 0, profilesPending: false,
+    profilesProc: {running: false}, pointerProfiles: {loading: false, error: '', directory: '', profiles: []},
+    scrollFeel: { profile: 'mac', curve: require('./Curve.js').scrollDefaults() },
+    curveEditor: {},
     keyCatcher: { forceActiveFocus() {} },
     scrollDebounce: { running: false, stop() { this.running = false; } },
     pointerDebounce: { running: false, stop() { this.running = false; } }
@@ -29,6 +38,22 @@ function context() {
   for (const source of functions) vm.runInContext(source, ctx);
   ctx.loadSelection();
   return ctx;
+}
+
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  ctx.devices[0].curve_calibration = { apple: 47 };
+  ctx.enqueue('pointer_feel', {profile: 'custom', curve: ctx.Curve.defaults()});
+  assert.equal(ctx.devices[0].previous_pointer_feel.calibration.apple, 47,
+    'optimistic undo must retain the old curve calibration');
+  ctx.loadSelection();
+  ctx.restorePointerFeel();
+  assert.equal(ctx.pendingActions.at(-1).option, 'pointer_restore');
+  assert.equal(ctx.pendingActions.at(-1).value.calibration.apple, 47,
+    'undo sends saved calibration to the backend');
+  assert.equal(Object.hasOwn(ctx.curveEditor.draft, 'calibration'), false,
+    'editable Apply drafts must not carry undo-only calibration');
 }
 
 {
@@ -178,21 +203,21 @@ function context() {
   assert.equal(vm.runInContext(backendExpression, ctx), '/tmp/plugin with spaces/trackpads.py');
 }
 
-// The former Mac-inspired preset is an ordinary curve, shown and undone as Custom.
+// Mac-inspired remains available alongside optional imported profiles.
 {
   const Curve = require('./Curve.js');
   const curve = {precision: 0.2, start: 0.8, end: 2.8, fast: 1};
   const feel = Curve.fromSettings({accel_profile: 'custom', curve_preset: 'mac', curve});
-  assert.equal(feel.profile, 'custom');
+  assert.equal(feel.profile, 'mac');
   assert.deepEqual(feel.curve, curve);
-  assert.equal(Curve.label(feel), 'Custom');
+  assert.equal(Curve.label(feel), 'Mac-inspired');
   assert.ok(Curve.usesCurve('mac'), 'an earlier undo record still restores as a curve');
   const ctx = context();
   ctx.actionProc.running = true;
   ctx.previousFeels.apple = {profile: 'mac', curve};
   ctx.restorePointerFeel();
   assert.equal(ctx.devices[0].settings.accel_profile, 'custom');
-  assert.equal(ctx.pointerFeel.profile, 'custom');
+  assert.equal(ctx.pointerFeel.profile, 'mac');
 }
 
 // macOS profiles: a previewed file is applied by reference and undone by its converted curve.
@@ -433,3 +458,109 @@ function context() {
   assert.equal(model.parseTouchpadDevice(JSON.stringify({mice: [{name: 'bcm5974-mouse'}]})), '');
 }
 console.log('Passed: device selection, fine scroll steps, stale-read rejection, debounce ordering, timeout recovery, and IPC configuration.');
+
+{
+  const ctx = context();
+  ctx.activeTab = 'pointer';
+  ctx.palmEditor.settings = {supported: true};
+  assert.ok(ctx.navigationSections().includes('palm'));
+  ctx.focusSection = 'palm';
+  ctx.activateCursor();
+  assert.equal(ctx.keyboardNavigationBlocked(), true);
+  ctx.palmRequestDevice = 'apple';
+  ctx.selectedDevice = 'dell';
+  ctx.receivePalm(JSON.stringify({supported: true, threshold: 700}));
+  assert.equal(ctx.palmEditor.settings.threshold, undefined, 'stale Apple response must not update Dell');
+  ctx.palmProc.running = false;
+  ctx.applyPalm('700');
+  assert.equal(ctx.palmProc.running, false, 'Dell must never start an Apple palm write');
+}
+{
+  const ctx = context();
+  ctx.applyPalm('700');
+  assert.equal(ctx.palmEditor.busy, true);
+  assert.equal(ctx.palmProc.command[3], '120', 'administrator prompt gets a bounded, interactive deadline');
+  assert.deepEqual(Array.from(ctx.palmProc.command).slice(-3), ['set', 'apple', '700']);
+  ctx.palmEditor.dirty = true;
+  ctx.receivePalm(JSON.stringify({device: 'apple', supported: true, threshold: 700, pending: true}));
+  assert.equal(ctx.palmEditor.dirty, false);
+  assert.equal(ctx.palmEditor.settings.pending, true);
+}
+console.log('Palm panel action scoping and stale-response checks passed.');
+
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  ctx.curveKind = 'scroll';
+  const first = {profile: 'custom', curve: {precision: 0.8, start: 0.5, end: 2.2, fast: 1.7}};
+  const second = {profile: 'custom', curve: {precision: 1.2, start: 0.5, end: 2.2, fast: 2.8}};
+  ctx.applyPointerFeel(first);
+  ctx.applyPointerFeel(second);
+  assert.equal(ctx.pendingActions.length, 2, 'scroll Apply operations must preserve undo ordering');
+  assert.equal(JSON.stringify(ctx.previousScrollFeels.apple), JSON.stringify(first));
+  ctx.restorePointerFeel();
+  assert.equal(ctx.pendingActions.length, 3);
+  assert.equal(JSON.stringify(ctx.pendingActions[2].value), JSON.stringify(first));
+  assert.equal(JSON.stringify(ctx.previousScrollFeels.apple), JSON.stringify(second));
+}
+
+// Imported undo retains the materialized curve and calibration; the editable draft stays clean.
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  const imported = {file: 'saved.json', sha256: 'c'.repeat(64), tracking_speed: 1,
+    name: 'Mac', devices: {apple: {step: 0.1, points: [0, 1]}}};
+  ctx.devices[0].settings = {...ctx.devices[0].settings, accel_profile: 'custom',
+    curve_preset: 'imported', imported_curve: imported, curve: ctx.Curve.defaults()};
+  ctx.devices[0].curve_calibration = {apple: 47};
+  ctx.loadSelection();
+  ctx.applyPointerFeel({profile: 'custom', curve: ctx.Curve.defaults()});
+  ctx.restorePointerFeel();
+  const restore = ctx.pendingActions.at(-1);
+  assert.equal(restore.option, 'pointer_restore');
+  assert.deepEqual(restore.value.imported, imported);
+  assert.equal(restore.value.calibration.apple, 47);
+  assert.equal(ctx.curveEditor.draft.profile, 'imported');
+  assert.equal(ctx.Curve.same(ctx.curveEditor.draft, ctx.pointerFeel), true);
+  assert.equal(Object.hasOwn(ctx.curveEditor.draft, 'calibration'), false);
+  ctx.applyPointerFeel(ctx.curveEditor.draft);
+  assert.deepEqual(ctx.pendingActions.at(-1).value.imported,
+    {file: 'saved.json', sha256: 'c'.repeat(64), tracking_speed: 1},
+    'a fresh Apply resolves the source again rather than reusing undo data');
+}
+
+// Progressive scrolling stays independent of the imported pointer curve.
+{
+  const ctx = context();
+  ctx.actionProc.running = true;
+  const imported = {file: 'saved.json', sha256: 'd'.repeat(64), tracking_speed: 1};
+  ctx.applyPointerFeel({profile: 'imported', curve: ctx.Curve.defaults(), imported});
+  ctx.toggleProgressiveScroll();
+  assert.equal(ctx.pointerFeel.profile, 'imported');
+  assert.equal(ctx.devices[0].settings.scroll_progressive, true);
+  assert.equal(ctx.devices[0].settings.curve_preset, 'imported');
+  ctx.curveKind = 'scroll';
+  ctx.applyPointerFeel({profile: 'mac', curve: ctx.Curve.scrollDefaults()});
+  assert.equal(ctx.pointerFeel.profile, 'imported');
+  assert.equal(ctx.scrollFeel.curve.precision, 1);
+  assert.equal(ctx.scrollFeel.curve.fast, 2);
+}
+
+// Profile discovery never publishes a reply after device or tab changes.
+{
+  const ctx = context();
+  ctx.editingCurve = true;
+  ctx.refreshProfiles();
+  const request = ctx.profilesProc.requestId;
+  ctx.selectDevice('dell');
+  ctx.receiveProfiles(JSON.stringify({profiles: [{file: 'old.json'}]}), request);
+  assert.equal(ctx.pointerProfiles.profiles.length, 0);
+  ctx.profilesProc.running = false;
+  ctx.refreshProfiles();
+  const next = ctx.profilesProc.requestId;
+  ctx.changeTab('scrolling');
+  ctx.receiveProfiles(JSON.stringify({profiles: [{file: 'wrong-tab.json'}]}), next);
+  assert.equal(ctx.pointerProfiles.profiles.length, 0);
+  assert.equal(ctx.editingCurve, false);
+}
+console.log('Imported Apply/undo, progressive scrolling, retained Mac-inspired, and stale profile reads passed.');

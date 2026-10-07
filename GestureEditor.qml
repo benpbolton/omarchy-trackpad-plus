@@ -8,7 +8,7 @@ FocusScope {
   required property color accent
   required property string fontFamily
   property real uiScale: 1
-  property var draft: ({enabled: false, fingers: 3, distance: 300, invert: false, overview: false})
+  property var draft: ({enabled: false, fingers: 3, distance: 300, invert: false, overview: false, fullscreen_up: false, scratchpad_down: false})
   property var companion: ({installed: false, message: "Checking Trackpad Plus overview…"})
   property bool previewBusy: false
   property string previewText: ""
@@ -39,6 +39,8 @@ FocusScope {
   function load(settings) {
     var next = JSON.parse(JSON.stringify(settings))
     next.overview = settings.overview === true
+    next.fullscreen_up = settings.fullscreen_up === true
+    next.scratchpad_down = settings.scratchpad_down === true
     next.overview_provider = settings.overview_provider || "hymission"
     draft = next
     distanceInput.text = Qt.binding(function() { return String(distanceSpinner.value) })
@@ -47,6 +49,11 @@ FocusScope {
     if (draft[key] === value) return
     var next = JSON.parse(JSON.stringify(draft))
     next[key] = value
+    if ((key === "overview" && value) || (key === "enabled" && !value)) {
+      next.fullscreen_up = false
+      next.scratchpad_down = false
+    }
+    if ((key === "fullscreen_up" || key === "scratchpad_down") && value) next.overview = false
     draft = next
   }
   function providerDescription() {
@@ -140,7 +147,7 @@ FocusScope {
           width: (contents.width - 6 * editor.uiScale) / 2
           text: modelData + " fingers"
           selected: editor.draft.fingers === modelData
-          enabled: editor.canEdit && (editor.draft.enabled || editor.draft.overview) && !editor.busy
+          enabled: editor.canEdit && (editor.draft.enabled || editor.draft.overview || editor.draft.fullscreen_up || editor.draft.scratchpad_down) && !editor.busy
           onClicked: editor.change("fingers", modelData)
         }
       }
@@ -291,6 +298,35 @@ FocusScope {
       visible: editor.companionSelected && editor.previewText !== ""
       width: parent.width
       text: editor.previewText
+      opacity: 0.7
+    }
+    Divider {}
+    Label {
+      width: parent.width
+      text: "Mac-style vertical swipes"
+      font.bold: true
+    }
+    Action {
+      objectName: "gestureFullscreenUp"
+      width: parent.width
+      text: "Swipe up for fullscreen"
+      selected: editor.draft.fullscreen_up
+      enabled: editor.canEdit && editor.draft.enabled && !editor.busy
+      Accessible.name: "Swipe up for fullscreen " + (editor.draft.fullscreen_up ? "on" : "off")
+      onClicked: editor.change("fullscreen_up", !editor.draft.fullscreen_up)
+    }
+    Action {
+      objectName: "gestureScratchpadDown"
+      width: parent.width
+      text: "Swipe down for scratchpad"
+      selected: editor.draft.scratchpad_down
+      enabled: editor.canEdit && editor.draft.enabled && !editor.busy
+      Accessible.name: "Swipe down for scratchpad " + (editor.draft.scratchpad_down ? "on" : "off")
+      onClicked: editor.change("scratchpad_down", !editor.draft.scratchpad_down)
+    }
+    Label {
+      width: parent.width
+      text: "Overview owns both directions; enabling one of these turns overview off. Uses the same finger count as the workspace swipe."
       opacity: 0.7
     }
     Divider {}

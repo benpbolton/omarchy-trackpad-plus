@@ -115,8 +115,16 @@ else:
         self.assertEqual(generated.count('accel_profile = "custom 0.'), 2)
         restarted = next(device for device in self.call('state')['devices'] if device['id'] == 'apple')
         self.assertEqual(restarted['settings']['imported_curve'], apple['settings']['imported_curve'])
-        undone = self.call('set', 'apple', 'pointer_feel', json.dumps(apple['previous_pointer_feel']))
+        undone = self.call('set', 'apple', 'pointer_restore', json.dumps(apple['previous_pointer_feel']))
         self.assertEqual(next(d for d in undone['devices'] if d['id'] == 'apple')['settings']['accel_profile'], 'adaptive')
+
+    def test_optional_typing_guard_and_login_service_are_packaged(self):
+        import configparser
+        self.assertTrue((self.plugin / 'trackpad-typing-guard.py').is_file())
+        service = configparser.ConfigParser(interpolation=None)
+        service.read(self.plugin / 'trackpad-typing-guard.service')
+        self.assertEqual(service['Install']['WantedBy'], 'graphical-session.target')
+        self.assertIn(' restore', service['Service']['ExecStopPost'])
 
     def test_stow_gesture_cli_preserves_links_across_process_restarts(self):
         for layout in ('file', 'hypr-directory', 'config-directory'):

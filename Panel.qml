@@ -43,6 +43,10 @@ Panel {
   property var pointerProfiles: ({ loading: false, error: "", directory: "", profiles: [] })
   property int profilesRequest: 0
   property bool profilesPending: false
+  property bool scrollProgressive: false
+  property var scrollFeel: ({ profile: "mac", curve: Curve.scrollDefaults() })
+  property var previousScrollFeels: ({})
+  property string curveKind: "pointer"
   property bool editingCurve: false
   property bool deviceSettingsOpen: false
   property bool gestureCanEdit: false
@@ -66,6 +70,43 @@ Panel {
   property int stateGeneration: 0
   property bool refreshPending: false
   readonly property string backend: decodeURIComponent(String(Qt.resolvedUrl("trackpads.py")).replace(/^file:\/\//, ""))
+  readonly property string palmBackend: decodeURIComponent(String(Qt.resolvedUrl("palm.py")).replace(/^file:\/\//, ""))
+  property bool palmReceived: false
+  property string palmRequestDevice: ""
+
+  function refreshPalm() {
+    if (palmProc.running) return
+    if (selectedDevice !== "apple") {
+      palmEditor.acceptSettings({supported: false})
+      return
+    }
+    palmRequestDevice = selectedDevice
+    palmReceived = false
+    palmProc.command = bounded(8, ["python3", "-B", palmBackend, "state", selectedDevice])
+    palmProc.running = true
+  }
+
+  function applyPalm(threshold) {
+    if (palmProc.running || selectedDevice !== "apple") return
+    palmRequestDevice = selectedDevice
+    palmReceived = false
+    palmEditor.error = ""
+    palmEditor.busy = true
+    palmProc.command = bounded(120, ["python3", "-B", palmBackend, "set", selectedDevice, threshold])
+    palmProc.running = true
+  }
+
+  function receivePalm(raw) {
+    palmReceived = true
+    if (palmRequestDevice !== selectedDevice) return
+    try {
+      var data = JSON.parse(raw)
+      if (data.error) { palmEditor.error = data.error; return }
+      if (palmEditor.busy) palmEditor.dirty = false
+      palmEditor.error = ""
+      palmEditor.acceptSettings(data)
+    } catch (error) { palmEditor.error = "Could not read palm settings" }
+  }
 
   function updateState(raw) {
     var data
@@ -73,6 +114,7 @@ Panel {
     if (data.error) { settingsError = data.error; return }
     devices = data.devices || []
     loadSelection()
+    refreshPalm()
   }
 
   function loadSelection() {
@@ -99,6 +141,12 @@ Panel {
     if (row.previous_pointer_feel) previous[selectedDevice] = row.previous_pointer_feel
     else delete previous[selectedDevice]
     previousFeels = previous
+    scrollProgressive = v.scroll_progressive === true
+    scrollFeel = Curve.fromScrollSettings(v)
+    var previousScroll = Curve.copy(previousScrollFeels)
+    if (row.previous_scroll_feel) previousScroll[selectedDevice] = row.previous_scroll_feel
+    else delete previousScroll[selectedDevice]
+    previousScrollFeels = previousScroll
     scrollScale = v.scroll_scale || Math.max(1, v.scroll_factor)
     scrollFactor = v.scroll_factor / scrollScale
     pendingScrollFactor = scrollFactor
@@ -110,16 +158,22 @@ Panel {
     // Flush pending slider edits against the OLD device before changing selection.
     if (scrollDebounce.running) { scrollDebounce.stop(); commitScrollFactor() }
     if (pointerDebounce.running) { pointerDebounce.stop(); commitPointerSpeed() }
+    profilesRequest++ // Discard replies for a previous device or editor tab.
+    profilesPending = false
     selectedDevice = key
     settingsError = ""
     loadSelection()
+    palmEditor.resetDraft()
+    palmEditor.error = ""
+    palmEditor.acceptSettings({supported: false})
+    refreshPalm()
   }
 
   function enqueue(option, value) {
     var queue = pendingActions.slice()
     // Replace only consecutive writes of the same scalar; preserve profile/undo ordering.
     var last = queue.length ? queue[queue.length - 1] : null
-    if (last && last.device === selectedDevice && last.option === option && option !== "pointer_feel") {
+    if (last && last.device === selectedDevice && last.option === option && option !== "pointer_feel" && option !== "scroll_feel" && option !== "pointer_restore") {
       queue.pop()
     }
     if (queue.length >= 128) {
@@ -135,14 +189,34 @@ Panel {
     for (var i = 0; i < devices.length; i++) {
       if (devices[i].id === selectedDevice) {
         var settings = devices[i].settings
-        if (option === "pointer_feel") {
+        if (option === "pointer_feel" || option === "pointer_restore") {
           devices[i].previous_pointer_feel = Curve.fromSettings(settings)
+          devices[i].previous_pointer_feel.calibration = Curve.copy(devices[i].curve_calibration || {})
           devices[i].imported_drift = false
           settings.accel_profile = Curve.usesCurve(value.profile) ? "custom" : value.profile
           settings.curve = Curve.copy(value.curve)
           settings.curve_preset = value.profile === "mac" || value.profile === "imported" ? value.profile : "custom"
           if (value.profile === "imported") settings.imported_curve = Curve.copy(value.imported)
           else delete settings.imported_curve
+          if (value.calibration) devices[i].curve_calibration = Curve.copy(value.calibration)
+          if (value.profile === "adaptive" || value.profile === "flat") settings.scroll_progressive = false
+        } else if (option === "scroll_feel") {
+          devices[i].previous_scroll_feel = Curve.fromScrollSettings(settings)
+          settings.scroll_progressive = true
+          settings.scroll_curve = Curve.copy(value.curve)
+          settings.scroll_curve_preset = value.profile === "mac" ? "mac" : "custom"
+          if (settings.accel_profile !== "custom") {
+            settings.accel_profile = "custom"
+            settings.curve = Curve.presetForScale(settings.scroll_scale || Math.max(1, settings.scroll_factor))
+            settings.curve_preset = "mac"
+          }
+        } else if (option === "scroll_progressive") {
+          settings.scroll_progressive = value
+          if (value && settings.accel_profile !== "custom") {
+            settings.accel_profile = "custom"
+            settings.curve = Curve.presetForScale(settings.scroll_scale || Math.max(1, settings.scroll_factor))
+            settings.curve_preset = "mac"
+          }
         } else if (option === "scroll_scale") {
           var oldScale = settings.scroll_scale || Math.max(1, settings.scroll_factor)
           settings.scroll_factor = Math.round(settings.scroll_factor * value / oldScale * 1000000) / 1000000
@@ -246,15 +320,22 @@ Panel {
     var sections = ["device", "device-settings"]
     if (deviceSettingsOpen) sections.push("enable")
     sections.push("tabs")
-    if (activeTab === "scrolling") return sections.concat(["scroll", "natural"])
+    if (activeTab === "scrolling") {
+      var extra = ["scroll", "progressive"]
+      if (scrollProgressive) extra.push("scroll-accel")
+      return sections.concat(extra.concat(["natural"]))
+    }
     if (activeTab === "gestures") return sections
     if (!Curve.usesCurve(pointerFeel.profile)) sections.push("pointer")
-    return sections.concat(["acceleration", "tap", "typing", "clickfinger"])
+    sections = sections.concat(["acceleration", "tap", "typing", "clickfinger"])
+    if (palmEditor.settings.supported) sections.push("palm")
+    return sections
   }
 
   function changeTab(tab) {
     if (["pointer", "scrolling", "gestures"].indexOf(tab) < 0) return
     selectDevice(selectedDevice) // Commit pending slider edits before hiding them.
+    editingCurve = false
     activeTab = tab
     focusSection = "tabs"
     keyCatcher.forceActiveFocus()
@@ -278,7 +359,7 @@ Panel {
     : "transparent"
 
   function keyboardNavigationBlocked() {
-    return editingCurve || gestureEditor.activeFocus
+    return editingCurve || gestureEditor.activeFocus || palmEditor.activeFocus
   }
 
   function moveCursor(delta) {
@@ -316,10 +397,13 @@ Panel {
     if (focusSection === "tabs" && activeTab === "gestures") { gestureEditor.beginEditing(); return }
     if (focusSection === "device-settings") { toggleDeviceSettings(selectedDevice); return }
     if (focusSection === "acceleration") { openCurveEditor(); return }
+    if (focusSection === "scroll-accel") { openScrollEditor(); return }
+    if (focusSection === "progressive") { toggleProgressiveScroll(); return }
     if (focusSection === "enable") { toggleTouchpad(); return }
     if (focusSection === "natural") { toggleNaturalScroll(); return }
     if (focusSection === "tap") { toggleTapToClick(); return }
     if (focusSection === "typing") { toggleDisableWhileTyping(); return }
+    if (focusSection === "palm") { palmEditor.beginEditing(); return }
     if (focusSection === "clickfinger") { toggleClickfingerBehavior(); return }
   }
 
@@ -379,6 +463,7 @@ Panel {
   function openCurveEditor() {
     if (!touchpadEnabled) return
     selectDevice(selectedDevice) // Flush any pending speed edits first.
+    curveKind = "pointer"
     editingCurve = true
     curveEditor.begin()
     refreshProfiles()
@@ -389,14 +474,15 @@ Panel {
     if (profilesProc.running) { profilesPending = true; return }
     profilesPending = false
     profilesRequest++
-    pointerProfiles = { loading: true, error: "", directory: pointerProfiles.directory, profiles: pointerProfiles.profiles, device: selectedDevice }
+    pointerProfiles = { loading: true, error: "", directory: pointerProfiles.directory,
+      profiles: pointerProfiles.device === selectedDevice ? pointerProfiles.profiles : [], device: selectedDevice }
     profilesProc.requestId = profilesRequest
     profilesProc.command = bounded(15, ["python3", backend, "profiles", selectedDevice])
     profilesProc.running = true
   }
 
   function receiveProfiles(raw, request) {
-    if (request !== profilesRequest) return
+    if (request !== profilesRequest || pointerProfiles.device !== selectedDevice || curveKind !== "pointer" || !editingCurve) return
     var data
     try { data = JSON.parse(raw) } catch (e) { data = { error: "Could not read pointer profiles" } }
     if (data.error || pointerProfiles.device !== selectedDevice) {
@@ -411,22 +497,54 @@ Panel {
   function finishProfiles(code, request) {
     if (request === profilesRequest && pointerProfiles.loading)
       pointerProfiles = { loading: false, error: "Could not read pointer profiles", directory: "", profiles: [], device: pointerProfiles.device }
-    if (profilesPending && editingCurve) refreshProfiles()
+    if (profilesPending && editingCurve && curveKind === "pointer") refreshProfiles()
   }
 
-  function applyPointerFeel(value) {
+  function openScrollEditor() {
+    if (!touchpadEnabled) return
+    selectDevice(selectedDevice)
+    curveKind = "scroll"
+    editingCurve = true
+    curveEditor.begin()
+  }
+
+  function toggleProgressiveScroll() {
+    var next = !scrollProgressive
+    scrollProgressive = next
+    if (next && !Curve.usesCurve(pointerFeel.profile)) {
+      pointerFeel = { profile: "mac", curve: Curve.presetForScale(scrollScale) }
+    }
+    enqueue("scroll_progressive", next)
+  }
+
+  function applyPointerFeel(value, restoring) {
+    if (curveKind === "scroll") {
+      var previousScroll = Curve.copy(previousScrollFeels)
+      previousScroll[selectedDevice] = Curve.copy(scrollFeel)
+      previousScrollFeels = previousScroll
+      enqueue("scroll_feel", value)
+      loadSelection()
+      return
+    }
     var previous = Curve.copy(previousFeels)
     previous[selectedDevice] = Curve.copy(pointerFeel)
     previousFeels = previous
-    enqueue("pointer_feel", value)
+    enqueue(restoring ? "pointer_restore" : "pointer_feel", value)
     loadSelection()
   }
 
   function restorePointerFeel() {
+    if (curveKind === "scroll") {
+      if (!previousScrollFeels[selectedDevice]) return
+      var scrollValue = Curve.copy(previousScrollFeels[selectedDevice])
+      applyPointerFeel(scrollValue)
+      curveEditor.draft = Curve.copy(scrollValue)
+      return
+    }
     if (!previousFeels[selectedDevice]) return
     var value = Curve.copy(previousFeels[selectedDevice])
-    applyPointerFeel(value)
-    curveEditor.draft = Curve.copy(value)
+    applyPointerFeel(value, true)
+    curveEditor.draft = Curve.fromSettings(devices.filter(function(row) { return row.id === selectedDevice })[0].settings)
   }
 
   function toggleDeviceSettings(key) {
@@ -605,6 +723,20 @@ Panel {
   }
 
   Process {
+    id: palmProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.receivePalm(String(text))
+    }
+    onExited: function(code, status) {
+      if (root.palmRequestDevice === root.selectedDevice && code !== 0 && !root.palmReceived)
+        palmEditor.error = "Palm settings did not respond in time"
+      palmEditor.busy = false
+      if (root.palmRequestDevice !== root.selectedDevice) Qt.callLater(root.refreshPalm)
+    }
+  }
+
+  Process {
     id: gestureProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -689,13 +821,14 @@ Panel {
             accent: Color.accent
             fontFamily: root.bar.fontFamily
             uiScale: Style.space(100) / 100
-            saved: root.pointerFeel
+            saved: root.curveKind === "scroll" ? root.scrollFeel : root.pointerFeel
+            kind: root.curveKind
             gainMaximum: root.scrollScale
             deviceLabel: root.selectedLabel + " Trackpad"
             busy: actionProc.running || root.pendingActions.length > 0
             settingsError: root.settingsError
-            canRestore: !!root.previousFeels[root.selectedDevice]
-            drift: root.pointerDrift
+            canRestore: root.curveKind === "scroll" ? !!root.previousScrollFeels[root.selectedDevice] : !!root.previousFeels[root.selectedDevice]
+            drift: root.curveKind === "pointer" && root.pointerDrift
             profiles: root.pointerProfiles.device === root.selectedDevice ? root.pointerProfiles.profiles : []
             profilesDirectory: root.pointerProfiles.directory
             profilesStatus: root.pointerProfiles.loading ? "Looking for macOS profiles…" : root.pointerProfiles.error
@@ -895,7 +1028,7 @@ Panel {
           Text {
             width: parent.width - Style.space(20)
             x: Style.space(10)
-            text: "Sets the scroll range and acceleration chart maximum. Use 1× for this trackpad or 3× for a wider range."
+            text: "Sets the scroll-speed range and pointer acceleration chart maximum. The scroll acceleration chart has its own 10× range."
             wrapMode: Text.WordWrap
             color: Qt.darker(root.bar.foreground, 1.4)
             font.family: root.bar.fontFamily
@@ -1300,6 +1433,53 @@ Panel {
 
           ToggleRow {
             width: parent.width
+            label: "Progressive Scrolling"
+            description: "Slow swipes stay precise; faster flicks cover more distance, like macOS"
+            checked: root.scrollProgressive
+            sectionName: "progressive"
+            visible: root.activeTab === "scrolling"
+            enabled: root.touchpadEnabled
+            onToggled: root.toggleProgressiveScroll()
+          }
+
+          SettingRow {
+            sectionName: "scroll-accel"
+            visible: root.activeTab === "scrolling" && root.scrollProgressive
+            width: parent.width
+            height: Style.space(58)
+            foreground: root.bar.foreground
+            fill: root.hoverFill
+            opacity: root.touchpadEnabled ? 1.0 : 0.4
+            enabled: root.touchpadEnabled
+            Column {
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(3)
+              Text {
+                text: "Scroll acceleration  ›"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Text {
+                text: ({ mac: "Mac-inspired", custom: "Custom" })[root.scrollFeel.profile] + " · Slow vs flick response"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onContainsMouseChanged: if (containsMouse) { root.cursorActive = true; root.focusSection = "scroll-accel" }
+              onClicked: root.openScrollEditor()
+            }
+          }
+
+          ToggleRow {
+            width: parent.width
             label: "Natural Scrolling"
             description: "Scroll content in the direction of finger movement"
             checked: root.naturalScroll
@@ -1340,6 +1520,22 @@ Panel {
             visible: root.activeTab === "pointer"
             enabled: root.touchpadEnabled
             onToggled: root.toggleClickfingerBehavior()
+          }
+
+          PalmSettings {
+            id: palmEditor
+            loading: palmProc.running && !busy
+            width: parent.width - Style.space(20)
+            x: Style.space(10)
+            visible: root.activeTab === "pointer" && root.selectedDevice === "apple" && settings.supported === true
+            foreground: root.bar.foreground
+            accent: Color.accent
+            fontFamily: root.bar.fontFamily
+            bodySize: Style.font.body
+            captionSize: Style.font.caption
+            unit: Style.space(1)
+            onApplyRequested: function(threshold) { root.applyPalm(threshold) }
+            onEditingFinished: keyCatcher.forceActiveFocus()
           }
         }
 

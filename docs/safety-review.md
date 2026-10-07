@@ -1,5 +1,71 @@
 # Release safety review
 
+## Current release scope — September 15, 2026
+
+Runtime source: `d6d35e13026ff4af4a4b88722eadee2697870a85`, version
+`2026.09.15.2`. The earlier review below is retained as historical evidence;
+its test counts and description of the runtime do not cover the later gesture,
+Stow, or overview work. Current commands, host versions, observed results, and
+pending release checks are recorded in [MARKETPLACE.md](../MARKETPLACE.md).
+This is a maintainer source review and test report, not an independent audit.
+
+The complete host suite passed on an M2/aarch64 Omarchy 4.0.3 host: 154 Python
+tests, both Node suites, all five inherited panel IPC commands, 43 Qt test
+entries, lint of 12 QML sources, manifest validation, and legacy syntax checks.
+The live overview harness passed actual preview rendering and lifecycle checks
+over ten cycles. Those results do not establish x86_64 rendering compatibility
+or physical gesture feel, and they do not replace the interactive lock test.
+
+### Boundaries added since the original review
+
+- **Gestures:** explicit Apply writes a marked block in the user's `input.lua`
+  and reloads input configuration. The original file is backed up. Conflicting
+  definitions are rejected. Restore original removes the managed block while
+  preserving unrelated edits. Failure recovery checks the current content
+  before replacing it; a concurrent manual edit can require manual recovery.
+- **Stow:** editable config may resolve through user-owned symlinks. Atomic
+  writes target the resolved regular file and preserve the links. The journal
+  binds recovery to that resolved target; retargeting a link prevents replay.
+  Private state, backups, and journals still reject symlinks and hard links.
+- **Overview controller:** a separate user process starts only on explicit
+  start/open/toggle actions. Process identity, version, compositor session, and
+  token checks precede IPC mutations or termination. Runtime ownership records
+  live in a private directory under `XDG_RUNTIME_DIR`; status/close/stop do not
+  launch a missing companion. Stop it before replacing or removing its files.
+- **Capture and lock state:** Quickshell captures static window previews in
+  memory. The overview reads workspace/window metadata, including titles, and
+  the current wallpaper. No plugin code writes previews or titles to files,
+  telemetry, or network services. Hidden/locked views release capture sources;
+  unknown lock state prevents opening. Real offscreen IPC tests exercise lock,
+  unlock, and observer failure with a fake observer; the live lock test remains
+  a distinct acceptance check.
+- **Dependencies:** Python invokes bounded compositor and Quickshell commands.
+  HyMission remains optional, separately installed, and subject to its own
+  license and architecture limitations. The plugin does not install it.
+  Following its README link leaves the plugin for the upstream instructions.
+
+The inherited helpers remain shipped for compatibility and are included in
+source review and syntax checks. The plugin runtime uses no privileged commands
+or package installation. The CI workflow installs test dependencies on a
+disposable GitHub runner; that is separate from plugin installation.
+
+### Remaining limits
+
+First edits apply all displayed settings for the selected device group, whose
+initial values need not reflect arbitrary existing per-device customizations.
+Previously configured groups can regenerate their saved overrides during state
+refresh. Removal preserves those overrides unless the user follows the README
+cleanup steps. Gesture restoration must precede removal to avoid leaving
+bindings that refer to removed files.
+
+The overview remains experimental. Preview display sizes do not bound the
+compositor's source-buffer allocations, and ten live cycles do not establish
+a long-term memory bound. No new claim about secret scanning across Git history
+is made by this update. PR #12 and later runtime commits are outside these
+results and require their own review and regression testing.
+
+## Historical review — September 13, 2026
+
 Reviewed on 2026-09-13, starting from `a95581a` (2.0.3). The fixes accompany
 this document on `fix/release-safety-review`. This is a source review and
 regression test pass, not an independent security certification.

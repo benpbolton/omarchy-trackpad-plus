@@ -27,8 +27,8 @@ PLOT_SPEEDS = [1] + list(range(10, 410, 10))  # finger speed, mm/s
 
 
 def number(value, low, high, integer=False):
-    if type(value) not in ((int,) if integer else (int, float)) or not math.isfinite(value) \
-            or not low <= value <= high:
+    if type(value) not in ((int,) if integer else (int, float)) or not low <= value <= high \
+            or not math.isfinite(value):
         raise ValueError('Pointer profile value is outside its allowed range')
     return value
 
@@ -175,9 +175,9 @@ def apple_event(f, dx, dy, dt_ms, driver):
     return dx * scale, dy * scale
 
 
-def floor_gain(f, whole, driver):
+def floor_gain(f, whole, driver, rate_multiplier=1.0):
     """Points per count for an event whose |Δ| floors to `whole` counts."""
-    velocity = max(whole, MINIMUM_VELOCITY)
+    velocity = max(whole * rate_multiplier, MINIMUM_VELOCITY)
     return apple_multiplier(f, velocity, driver) / velocity
 
 
@@ -187,23 +187,39 @@ def cursor_speed(f, finger_in_s, driver):
     `deltas` describes the closed multitouch driver: ideal (continuous counts), integer
     (whole counts with carried remainders), or fractional, where Apple's per-event floor makes
     a sawtooth; a stroke's per-event counts vary, so that case averages over one count.
+    All three models retain Apple's normalization for events arriving later than the
+    report period; skipped zero-delta integer frames also contribute to that delay.
     """
     rate = driver['event_rate_hz']
     counts = driver['counts_per_inch'] * finger_in_s / rate
+    rate_multiplier = min(rate / driver['report_rate_hz'], 1.0)
     if driver['deltas'] == 'fractional':
         low, high, total = counts - 0.5, counts + 0.5, 0.0
         whole = math.floor(low)
         while whole < high:
             a, b = max(low, whole), min(high, whole + 1)
-            total += floor_gain(f, max(whole, 0), driver) * (b * b - a * a) / 2
+            total += floor_gain(f, max(whole, 0), driver, rate_multiplier) * (b * b - a * a) / 2
             whole += 1
         return rate * total
-    if driver['deltas'] == 'integer' and counts >= 1:
-        whole = math.floor(counts)
-        part = counts - whole
-        return rate * ((1 - part) * apple_multiplier(f, whole, driver)
-                       + part * apple_multiplier(f, whole + 1, driver))
-    return rate * apple_multiplier(f, counts, driver)
+    if driver['deltas'] == 'integer':
+        if counts >= 1:
+            whole = math.floor(counts)
+            part = counts - whole
+            return rate * ((1 - part) * whole * floor_gain(f, whole, driver, rate_multiplier)
+                           + part * (whole + 1) * floor_gain(f, whole + 1, driver, rate_multiplier))
+        if not counts:
+            return 0.0
+        # Carried integer remainders yield single-count events separated by either
+        # floor(1/counts) or ceil(1/counts) report periods. Apple normalizes each
+        # event by that actual gap, not the nominal period of zero-count frames.
+        gap = 1 / counts
+        whole = math.floor(gap)
+        part = gap - whole
+        gain = sum(weight * floor_gain(f, 1, driver, min(rate / driver['report_rate_hz'] / periods, 1.0))
+                   for weight, periods in ((1 - part, whole), (part, whole + 1)))
+        return rate * counts * gain
+    # Ideal deltas remove Apple's integer floor, while retaining its timing clamp.
+    return rate * counts * floor_gain(f, counts, driver, rate_multiplier)
 
 
 def mm_per_point(profile):
@@ -244,6 +260,11 @@ def convert(profile, units_per_mm, scale):
 
     if parameters['tangent_linear']:
         counts = parameters['tangent_linear'] * driver['resolution_dpi'] / FRAME_RATE
+        counts /= min(driver['event_rate_hz'] / driver['report_rate_hz'], 1.0)
+        if driver['deltas'] != 'ideal':
+            # Every floored count contributing to either final sample must
+            # clear the tangent, including the fractional model's jitter edge.
+            counts = math.ceil(counts) + (0.5 if driver['deltas'] == 'fractional' else 0)
         linear_from = counts * driver['event_rate_hz'] / driver['counts_per_inch'] / inches
         step = math.ceil(linear_from / (NPOINTS - 2) * 10000) / 10000
     else:

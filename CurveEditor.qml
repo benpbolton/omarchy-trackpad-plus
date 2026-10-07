@@ -11,10 +11,13 @@ FocusScope {
   required property string fontFamily
   property real uiScale: 1
   property real gainMaximum: 1
-  readonly property bool curveExceedsRange: draft.curve.fast > gainMaximum
+  readonly property real curveMaximum: scrollMode ? 10 : gainMaximum
+  readonly property bool curveExceedsRange: draft.curve.fast > curveMaximum
   property var saved: ({ profile: "adaptive", curve: Curve.defaults() })
   property var draft: Curve.copy(saved)
   property string deviceLabel: "Trackpad"
+  property string kind: "pointer"
+  readonly property bool scrollMode: kind === "scroll"
   property bool busy: false
   property string settingsError: ""
   property bool canRestore: false
@@ -52,7 +55,8 @@ FocusScope {
       draft = { profile: profile, curve: Curve.copy(draft.curve), imported: first ? reference(first) : null }
       return
     }
-    draft = { profile: profile, curve: Curve.copy(draft.curve) }
+    var preset = editor.scrollMode ? Curve.scrollDefaults() : Curve.presetForScale(gainMaximum)
+    draft = { profile: profile, curve: profile === "mac" ? preset : Curve.copy(draft.curve) }
   }
   function reference(row, speed) {
     return { file: row.file, sha256: row.sha256, name: row.name, tracking_speed: speed === undefined ? row.tracking_speed : speed }
@@ -83,10 +87,10 @@ FocusScope {
     applyRequested(Curve.copy(draft))
   }
   function adjust(handle, value, precise) {
-    draft = { profile: "custom", curve: Curve.adjust(draft.curve, handle, value, precise, gainMaximum) }
+    draft = { profile: "custom", curve: Curve.adjust(draft.curve, handle, value, precise, curveMaximum) }
   }
   onDraftChanged: graph.requestPaint()
-  onGainMaximumChanged: graph.requestPaint()
+  onCurveMaximumChanged: graph.requestPaint()
   onForegroundChanged: graph.requestPaint()
   onAccentChanged: graph.requestPaint()
   Keys.onEscapePressed: backRequested()
@@ -134,8 +138,8 @@ FocusScope {
       : controlIndex === 2 ? editor.draft.curve.end : editor.draft.curve.fast
     readonly property real minimum: controlIndex === 0 ? 0.01 : controlIndex === 1 ? 0
       : controlIndex === 2 ? editor.draft.curve.start + 0.2 : editor.draft.curve.precision
-    readonly property real maximum: controlIndex === 0 ? Math.max(editor.gainMaximum, editor.draft.curve.precision)
-      : controlIndex === 1 ? editor.draft.curve.end - 0.2 : controlIndex === 2 ? 4 : Math.max(editor.gainMaximum, editor.draft.curve.fast)
+    readonly property real maximum: controlIndex === 0 ? Math.max(editor.curveMaximum, editor.draft.curve.precision)
+      : controlIndex === 1 ? editor.draft.curve.end - 0.2 : controlIndex === 2 ? 4 : Math.max(editor.curveMaximum, editor.draft.curve.fast)
     objectName: "curveSpinner" + controlIndex
     from: Math.ceil(minimum * units * factor - 0.000001)
     to: Math.floor(maximum * units * factor + 0.000001)
@@ -221,7 +225,7 @@ FocusScope {
       Action { id: backButton; text: "‹ Back"; width: 70 * editor.uiScale; onClicked: editor.backRequested() }
       Column {
         width: parent.width - backButton.width - parent.spacing
-        Label { text: "Pointer feel"; font.pixelSize: 18 * editor.uiScale; font.bold: true }
+        Label { text: editor.scrollMode ? "Scroll acceleration" : "Pointer feel"; font.pixelSize: 18 * editor.uiScale; font.bold: true }
         Label { text: editor.deviceLabel; opacity: 0.65; width: parent.width; elide: Text.ElideRight; wrapMode: Text.NoWrap }
       }
     }
@@ -230,11 +234,15 @@ FocusScope {
       width: parent.width
       spacing: 5 * editor.uiScale
       Repeater {
-        model: [{ id: "adaptive", name: "System" }, { id: "flat", name: "Flat" }, { id: "imported", name: "macOS" }, { id: "custom", name: "Custom" }]
+        model: editor.scrollMode
+          ? [{ id: "mac", name: "Mac-inspired" }, { id: "custom", name: "Custom" }]
+          : [{ id: "adaptive", name: "System" }, { id: "mac", name: "Mac-inspired" }, { id: "flat", name: "Flat" }, { id: "imported", name: "macOS" }, { id: "custom", name: "Custom" }]
         Action {
           required property var modelData
           objectName: "profileChoice-" + modelData.id
-          width: (contents.width - 15 * editor.uiScale) / 4
+          width: editor.scrollMode
+            ? (contents.width - 5 * editor.uiScale) * (modelData.id === "mac" ? 1.4 : 1) / 2.4
+            : (contents.width - 20 * editor.uiScale) * (modelData.id === "mac" ? 1.4 : 1) / 5.4
           text: modelData.name
           selected: editor.draft.profile === modelData.id
           onClicked: editor.choose(modelData.id)
@@ -245,7 +253,9 @@ FocusScope {
     Label {
       visible: !editor.imported
       width: parent.width
-      text: editor.custom ? "A steady precision range for small corrections, then a smooth rise for faster swipes."
+      text: editor.scrollMode ? "Slow two-finger swipes stay precise; faster flicks cover more distance, like macOS."
+        : editor.draft.profile === "mac" ? "An experimental starting curve inspired by Mac tracking; tune it to your hand."
+        : editor.custom ? "A steady precision range for small corrections, then a smooth rise for faster swipes."
         : editor.draft.profile === "flat" ? "Constant response at every finger speed. Use Pointer Speed in the main panel to adjust it."
         : "Use libinput’s adaptive response and your existing Pointer Speed setting."
     }
@@ -253,8 +263,8 @@ FocusScope {
     Column {
       width: parent.width
       spacing: 6 * editor.uiScale
-      visible: editor.custom
-      Label { text: "Cursor travel (×)"; opacity: 0.7; font.pixelSize: 11 * editor.uiScale }
+      visible: editor.custom || editor.draft.profile === "mac"
+      Label { text: editor.scrollMode ? "Scroll travel (×)" : "Cursor travel (×)"; opacity: 0.7; font.pixelSize: 11 * editor.uiScale }
       Item {
         id: plot
         objectName: "curvePlot"
@@ -267,7 +277,7 @@ FocusScope {
         readonly property real plotWidth: width - leftInset - rightInset
         readonly property real plotHeight: height - topInset - bottomInset
         function px(speed) { return leftInset + speed / 4 * plotWidth }
-        function py(gain) { return topInset + (1 - Math.max(0, Math.min(1, gain / editor.gainMaximum))) * plotHeight }
+        function py(gain) { return topInset + (1 - Math.max(0, Math.min(1, gain / editor.curveMaximum))) * plotHeight }
         Canvas {
           id: graph
           anchors.fill: parent
@@ -282,9 +292,9 @@ FocusScope {
             ctx.lineWidth = 1
             ctx.font = (10 * editor.uiScale) + "px sans-serif"
             ctx.textAlign = "right"
-            var divisions = editor.gainMaximum === 3 ? 3 : 4
+            var divisions = editor.curveMaximum === 3 ? 3 : 4
             for (var tick = 0; tick <= divisions; tick++) {
-              var n = editor.gainMaximum * tick / divisions
+              var n = editor.curveMaximum * tick / divisions
               ctx.strokeStyle = Qt.alpha(editor.foreground, n === 1 ? 0.3 : 0.12)
               ctx.beginPath(); ctx.moveTo(plot.px(0), plot.py(n)); ctx.lineTo(plot.px(4), plot.py(n)); ctx.stroke()
               ctx.fillStyle = Qt.alpha(editor.foreground, 0.65)
@@ -352,7 +362,7 @@ FocusScope {
               onPositionChanged: function(mouse) {
                 if (!pressed) return
                 var p = mapToItem(plot, mouse.x, mouse.y)
-                editor.adjust(handle.index, handle.horizontal ? (p.x - plot.leftInset) / plot.plotWidth * 4 : (1 - (p.y - plot.topInset) / plot.plotHeight) * editor.gainMaximum)
+                editor.adjust(handle.index, handle.horizontal ? (p.x - plot.leftInset) / plot.plotWidth * 4 : (1 - (p.y - plot.topInset) / plot.plotHeight) * editor.curveMaximum)
               }
             }
           }
@@ -362,7 +372,8 @@ FocusScope {
       Label {
         visible: editor.curveExceedsRange
         width: parent.width
-        text: "This saved curve exceeds the chart range. Increase Device scale to see it fully; its values have been preserved."
+        text: editor.scrollMode ? "This saved curve exceeds the 10× chart range; its values have been preserved."
+          : "This saved curve exceeds the chart range. Increase Device scale to see it fully; its values have been preserved."
         font.pixelSize: 11 * editor.uiScale
         opacity: 0.7
       }
@@ -473,7 +484,9 @@ FocusScope {
     Label {
       visible: !editor.imported
       width: parent.width
-      text: editor.custom ? "Click a number and use ↑/↓; hold Shift for 10× steps. Type an exact value or drag the handles. Apply when ready."
+      text: editor.scrollMode && editor.draft.profile === "mac" ? "A starting curve inspired by macOS progressive scrolling. Apply, then flick vs creep to compare."
+        : editor.draft.profile === "mac" ? "An experimental starting point inspired by Mac tracking; tune it to your hand."
+        : editor.custom ? "Click a number and use ↑/↓; hold Shift for 10× steps. Type an exact value or drag the handles. Apply when ready."
         : "Choose Custom to edit a curve."
       opacity: 0.65
       font.pixelSize: 11 * editor.uiScale
@@ -509,6 +522,7 @@ FocusScope {
 
     Rectangle {
       id: practice
+      visible: !editor.scrollMode
       width: parent.width
       height: 100 * editor.uiScale
       radius: 6 * editor.uiScale

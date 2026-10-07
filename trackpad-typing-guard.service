@@ -1,0 +1,18 @@
+[Unit]
+Description=Trial typing protection for the Apple trackpad
+PartOf=graphical-session.target
+After=graphical-session.target
+StartLimitIntervalSec=30
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/lib/trackpad-typing-guard.py run
+ExecStopPost=/usr/bin/python3 %h/.local/lib/trackpad-typing-guard.py restore
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+UMask=0077
+
+[Install]
+WantedBy=graphical-session.target

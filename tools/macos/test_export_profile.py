@@ -100,6 +100,21 @@ class CheckTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             e.read_probe(path)
 
+    def test_mismatched_display_bounds_are_rejected_with_a_clear_error(self):
+        path = self.root / 'probe.csv'
+        recording(path)
+        _, rows, touches = e.read_probe(path)
+        with self.assertRaisesRegex(ValueError, 'selected display'):
+            e.check_probe(self.profile, (0, 0, 10, 10), rows, touches)
+
+    def test_nonpositive_event_gaps_are_rejected_with_a_clear_error(self):
+        path = self.root / 'probe.csv'
+        recording(path)
+        bounds, rows, touches = e.read_probe(path)
+        rows = [(rows[0][0], *row[1:]) for row in rows]
+        with self.assertRaisesRegex(ValueError, 'event timing'):
+            e.check_probe(self.profile, bounds, rows, touches)
+
     def test_shipped_profile_is_valid_and_verified(self):
         self.assertEqual(self.profile['tracking_speed'], 0.875)
         self.assertEqual(len(self.profile['curves']), 10)
