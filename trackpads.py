@@ -960,6 +960,7 @@ def ensure_custom_pointer(group):
     settings['accel_profile'] = 'custom'
     settings['curve'] = preset_for_scale(scale)
     settings['curve_preset'] = 'mac'
+    settings.pop('imported_curve', None)
     group['curve_calibration'] = capture_calibration(group['names'], group.get('curve_calibration', {}))
 
 

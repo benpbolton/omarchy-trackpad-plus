@@ -88,6 +88,25 @@ Rectangle {
       compare(editor.draft.profile, "imported")
       verify(!findChild(editor, "curvePlot").visible)
     }
+    function test_authoritative_read_pending_blocks_profile_actions() {
+      editor.profiles = profileRows()
+      editor.saved = {profile: "imported", curve: Curve.defaults(), imported: converted()}
+      editor.begin()
+      editor.setTrackingSpeed(1.5)
+      editor.canRestore = true
+      editor.drift = true
+      editor.busy = true
+      editor.settingsError = "Could not read trackpad settings"
+      verify(!findChild(editor, "applyCurve").enabled)
+      verify(!findChild(editor, "restoreCurve").enabled)
+      verify(!findChild(editor, "reapplyProfile").enabled)
+      verify(findChild(editor, "curveStatus").text.indexOf("Could not read") >= 0)
+      compare(applied.count, 0)
+      editor.busy = false
+      editor.settingsError = ""
+      verify(findChild(editor, "applyCurve").enabled)
+      verify(findChild(editor, "restoreCurve").enabled)
+    }
     function test_failed_save_is_not_labelled_applied() {
       editor.settingsError = "Compositor unavailable"
       var status = findChild(editor, "curveStatus")

@@ -65,10 +65,13 @@ Panel {
   property real pointerSpeed: 0.0
   property real pendingPointerSpeed: 0.0
   property string settingsError: ""
+  property string actionError: ""
   property var pendingActions: []
   property int editGeneration: 0
   property int stateGeneration: 0
   property bool refreshPending: false
+  // Profile writes can materialize imported curves; wait for authoritative undo data.
+  property bool pointerStatePending: false
   readonly property string backend: decodeURIComponent(String(Qt.resolvedUrl("trackpads.py")).replace(/^file:\/\//, ""))
   readonly property string palmBackend: decodeURIComponent(String(Qt.resolvedUrl("palm.py")).replace(/^file:\/\//, ""))
   property bool palmReceived: false
@@ -112,9 +115,11 @@ Panel {
     var data
     try { data = JSON.parse(raw) } catch (e) { settingsError = "Could not read trackpad settings"; return }
     if (data.error) { settingsError = data.error; return }
-    devices = data.devices || []
+    if (!Array.isArray(data.devices)) { settingsError = "Could not read trackpad settings"; return false }
+    devices = data.devices
     loadSelection()
     refreshPalm()
+    return true
   }
 
   function loadSelection() {
@@ -162,6 +167,7 @@ Panel {
     profilesPending = false
     selectedDevice = key
     settingsError = ""
+    actionError = ""
     loadSelection()
     palmEditor.resetDraft()
     palmEditor.error = ""
@@ -182,7 +188,10 @@ Panel {
       return
     }
     editGeneration++
+    if (["pointer_feel", "pointer_restore", "scroll_feel", "scroll_progressive", "accel_profile"].indexOf(option) >= 0)
+      pointerStatePending = true
     settingsError = ""
+    actionError = ""
     queue.push({ device: selectedDevice, option: option, value: option === "pointer_feel" ? Curve.request(value) : value })
     pendingActions = queue
     // Keep the local snapshot consistent while queued writes finish.
@@ -209,6 +218,7 @@ Panel {
             settings.accel_profile = "custom"
             settings.curve = Curve.presetForScale(settings.scroll_scale || Math.max(1, settings.scroll_factor))
             settings.curve_preset = "mac"
+            delete settings.imported_curve
           }
         } else if (option === "scroll_progressive") {
           settings.scroll_progressive = value
@@ -216,6 +226,7 @@ Panel {
             settings.accel_profile = "custom"
             settings.curve = Curve.presetForScale(settings.scroll_scale || Math.max(1, settings.scroll_factor))
             settings.curve_preset = "mac"
+            delete settings.imported_curve
           }
         } else if (option === "scroll_scale") {
           var oldScale = settings.scroll_scale || Math.max(1, settings.scroll_factor)
@@ -518,6 +529,7 @@ Panel {
   }
 
   function applyPointerFeel(value, restoring) {
+    if (pointerStatePending) return
     if (curveKind === "scroll") {
       var previousScroll = Curve.copy(previousScrollFeels)
       previousScroll[selectedDevice] = Curve.copy(scrollFeel)
@@ -534,6 +546,7 @@ Panel {
   }
 
   function restorePointerFeel() {
+    if (pointerStatePending) return
     if (curveKind === "scroll") {
       if (!previousScrollFeels[selectedDevice]) return
       var scrollValue = Curve.copy(previousScrollFeels[selectedDevice])
@@ -617,7 +630,10 @@ Panel {
       refreshPending = true
       return
     }
-    updateState(raw)
+    if (updateState(raw)) {
+      pointerStatePending = false
+      settingsError = actionError || ""
+    }
   }
 
   function finishStateRead(code) {
@@ -626,7 +642,8 @@ Panel {
   }
 
   function finishAction(code) {
-    if (code !== 0 && !settingsError) settingsError = "Could not save trackpad settings"
+    if (code !== 0 && !actionError) actionError = settingsError || "Could not save trackpad settings"
+    if (actionError) settingsError = actionError
     if (pendingActions.length) runNextAction()
     else refresh()
   }
@@ -700,8 +717,8 @@ Panel {
       onStreamFinished: {
         try {
           var data = JSON.parse(String(text))
-          if (data.error) root.settingsError = data.error
-        } catch (e) { root.settingsError = "Could not save trackpad settings" }
+          if (data.error) { root.actionError = data.error; root.settingsError = data.error }
+        } catch (e) { root.actionError = "Could not save trackpad settings"; root.settingsError = root.actionError }
       }
     }
     onExited: function(code, status) {
@@ -825,7 +842,7 @@ Panel {
             kind: root.curveKind
             gainMaximum: root.scrollScale
             deviceLabel: root.selectedLabel + " Trackpad"
-            busy: actionProc.running || root.pendingActions.length > 0
+            busy: actionProc.running || root.pendingActions.length > 0 || root.pointerStatePending
             settingsError: root.settingsError
             canRestore: root.curveKind === "scroll" ? !!root.previousScrollFeels[root.selectedDevice] : !!root.previousFeels[root.selectedDevice]
             drift: root.curveKind === "pointer" && root.pointerDrift

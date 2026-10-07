@@ -1064,6 +1064,32 @@ class TrackpadTests(unittest.TestCase):
         self.assertIn('accel_profile = "flat"', lua)
         self.assertNotIn('custom', lua)
 
+    def test_progressive_after_direct_native_override_creates_a_clean_mac_preset(self):
+        state = self.imported_state()
+        calibration = {name: 47 for name in state['devices']['apple']['names']}
+        state['devices']['apple']['curve_calibration'] = dict(calibration)
+        for native, option in product(('flat', 'adaptive'), ('scroll_progressive', 'scroll_feel')):
+            with self.subTest(native=native, option=option), \
+                    patch.object(m, 'hypr', side_effect=self.compositor), NATIVE():
+                overridden = m.change(state, 'apple', 'accel_profile', native)
+                group = overridden['devices']['apple']
+                previous_curve = copy.deepcopy(group['settings']['curve'])
+                # Direct native overrides may retain dormant imported metadata,
+                # but replacing that pointer with a Mac preset must discard it.
+                value = True if option == 'scroll_progressive' else {'profile': 'mac', 'curve': m.DEFAULT_SCROLL_CURVE}
+                updated = m.change(overridden, 'apple', option, value)
+                group = updated['devices']['apple']
+                settings = group['settings']
+                self.assertEqual(settings['accel_profile'], 'custom')
+                self.assertEqual(settings['curve_preset'], 'mac')
+                self.assertNotIn('imported_curve', settings)
+                self.assertTrue(settings['scroll_progressive'])
+                self.assertEqual(group['previous_pointer_feel'],
+                                 {'profile': native, 'curve': previous_curve, 'calibration': calibration})
+                restored = m.change(updated, 'apple', 'pointer_restore', group['previous_pointer_feel'])
+                self.assertEqual(restored['devices']['apple']['settings']['accel_profile'], native)
+                self.assertEqual(restored['devices']['apple']['curve_calibration'], calibration)
+
     def test_display_scale_drift_is_reported_without_rewriting(self):
         state = self.imported_state()
         same = m.snapshot(state, {}, PANEL[0])['devices'][0]
